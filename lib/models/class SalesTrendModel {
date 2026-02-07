@@ -1,0 +1,13 @@
+class SalesTrendModel {
+  final String label;
+  final double value;
+
+  SalesTrendModel({required this.label, required this.value});
+
+  factory SalesTrendModel.fromJson(Map<String, dynamic> json) {
+    return SalesTrendModel(
+      label: json['label'] ?? '',
+      value: double.tryParse(json['value']?.toString() ?? '0') ?? 0.0,
+    );
+  }
+}

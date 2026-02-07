@@ -1,0 +1,70 @@
+name: infinity_mobile
+description: Infinity POS Mobile Application.
+publish_to: 'none'
+
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.2.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  package_info_plus: ^8.0.0  # Pour savoir quelle version est installée
+  ota_update: ^5.1.0         # Pour télécharger et installer la mise à jour  
+
+  # --- SCANNER (Le nouveau, le bon) ---
+  ai_barcode_scanner: ^7.1.0
+  
+  
+
+  # --- FONCTIONNALITÉS ---
+  printing: ^5.13.0
+  pdf: ^3.10.0
+  image_picker: ^1.0.4
+  
+  # --- INTERNATIONALISATION ---
+  flutter_localizations:
+    sdk: flutter
+  intl: ^0.20.0
+
+  # --- CŒUR DE L'APPLICATION ---
+  provider: ^6.1.1
+  http: ^1.2.0
+  shared_preferences: ^2.5.4
+
+  # --- INTERFACE & DESIGN ---
+  font_awesome_flutter: ^10.7.0
+  google_fonts: ^6.1.0
+  fl_chart: ^0.68.0
+  cached_network_image: ^3.4.1
+  webview_flutter: ^4.13.1
+
+  # --- GESTION FICHIERS ---
+  path_provider: ^2.1.1
+  open_file: ^3.3.2
+  permission_handler: ^11.0.1
+  url_launcher: ^6.2.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.0
+  
+  # --- OUTIL POUR L'ICÔNE ---
+  flutter_launcher_icons: ^0.13.1
+
+# --- CONFIGURATION FLUTTER ---
+flutter:
+  uses-material-design: true
+
+  # assets:
+  #   - assets/images/
+
+# --- CONFIGURATION DE L'ICÔNE ---
+flutter_icons:
+  android: "ic_launcher"
+  ios: true
+  image_path: "assets/logo.png" 
+  adaptive_icon_background: "#FFFFFF" 
+  adaptive_icon_foreground: "assets/logo.png"
