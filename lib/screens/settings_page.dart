@@ -1,20 +1,18 @@
 import 'package:flutter/material.dart';
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
-import 'package:shared_preferences/shared_preferences.dart'; // AJOUTÉ
+import 'package:shared_preferences/shared_preferences.dart';
 import '../core/constants.dart';
-import 'activation_page.dart'; // AJOUTÉ pour la redirection
-import 'dart:async'; // Pour le StreamController
-import 'dart:io';    // Pour File
-import 'package:http/http.dart' as http; // Pour télécharger l'image
-import 'package:path_provider/path_provider.dart'; // Pour sauvegarder temporairement
-import '../services/api_service.dart'; // Ton service API
+import 'activation_page.dart';
+import 'dart:async';
+import '../services/api_service.dart';
+import '../services/update_service.dart'; // ✅ IMPORT IMPORTANT
+
 class SettingsPage extends StatelessWidget {
   final ValueChanged<ThemeMode> onThemeModeChanged;
   final ValueChanged<String> onLanguageChanged;
   final ThemeMode currentThemeMode;
   final String currentLanguage;
   
-  // Le callback pour changer le thème (non nullable de préférence pour la redirection)
   final VoidCallback? toggleTheme; 
   final VoidCallback? onBack;
 
@@ -30,7 +28,6 @@ class SettingsPage extends StatelessWidget {
 
   // --- FONCTION DE DÉCONNEXION ---
   Future<void> _logout(BuildContext context) async {
-    // 1. Demander confirmation
     final confirm = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -51,26 +48,22 @@ class SettingsPage extends StatelessWidget {
 
     if (confirm != true) return;
 
-    // 2. Supprimer les données locales
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove('license_key');
     await prefs.remove('is_activated');
-    // On peut aussi faire await prefs.clear(); si on veut tout supprimer
 
     if (!context.mounted) return;
 
-    // 3. Rediriger vers la page d'activation (et supprimer l'historique navigation)
     Navigator.pushAndRemoveUntil(
       context,
       MaterialPageRoute(
         builder: (context) => ActivationPage(
-          // On doit repasser les callbacks pour que l'app continue de fonctionner
           toggleTheme: toggleTheme ?? () {}, 
           onThemeModeChanged: onThemeModeChanged,
           onLanguageChanged: onLanguageChanged,
         ),
       ),
-      (route) => false, // Supprime toutes les pages précédentes
+      (route) => false,
     );
   }
 
@@ -111,8 +104,19 @@ class SettingsPage extends StatelessWidget {
             
             const SizedBox(height: 20),
             
-            // SECTION GÉNÉRAL
-            _buildSection(context, "Général", [
+            // SECTION SYSTÈME (NOUVEAU)
+            _buildSection(context, "Système", [
+               // ✅ BOUTON DE MISE À JOUR MANUELLE
+               ListTile(
+                leading: const Icon(Icons.system_update, color: Colors.teal),
+                title: const Text("Mise à jour"),
+                subtitle: const Text("Vérifier la version"),
+                trailing: const Icon(Icons.refresh, color: Colors.grey),
+                onTap: () {
+                   // Appel manuel du service de mise à jour
+                   UpdateService().checkForUpdate(context);
+                },
+              ),
               ListTile(
                 leading: const Icon(Icons.print, color: Colors.purple),
                 title: const Text("Imprimante"),
@@ -140,16 +144,18 @@ class SettingsPage extends StatelessWidget {
                 trailing: const Icon(Icons.chevron_right, color: Colors.grey),
                 onTap: () {},
               ),
-              // CORRECTION ICI : Ajout du onTap pour la déconnexion
               ListTile(
                 leading: const Icon(Icons.logout, color: Colors.red),
                 title: const Text("Déconnexion", style: TextStyle(color: Colors.red, fontWeight: FontWeight.bold)),
-                onTap: () => _logout(context), // Appel de la fonction
+                onTap: () => _logout(context),
               ),
             ], isDark),
             
             const SizedBox(height: 40),
-            const Text("Infinity POS v1.0.2", style: TextStyle(color: Colors.grey, fontSize: 12)),
+            // Tu peux laisser ça, ou le rendre dynamique avec PackageInfo plus tard
+            const Text("Infinity POS Mobile", style: TextStyle(color: Colors.grey, fontSize: 12, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 5),
+            const Text("v1.0.2", style: TextStyle(color: Colors.grey, fontSize: 10)),
           ],
         ),
       ),

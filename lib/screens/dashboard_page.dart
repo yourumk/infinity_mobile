@@ -10,6 +10,7 @@ import '../services/api_service.dart';
 import '../providers/data_provider.dart';
 import '../models/sales_trend_model.dart';
 import '../widgets/glass_card.dart';
+import '../services/update_service.dart';
 
 // Imports pour la navigation
 import 'sales_page.dart';
@@ -51,15 +52,20 @@ class _DashboardPageState extends State<DashboardPage> {
   List<dynamic> _recentPurchases = []; 
   List<dynamic> _sleepingStock = [];   
 
-  @override
+@override
   void initState() {
     super.initState();
     ApiService().startAutoSync();
+    
     WidgetsBinding.instance.addPostFrameCallback((_) {
       final provider = Provider.of<DataProvider>(context, listen: false);
       provider.startAutoRefresh();
       _loadTabsData();
       provider.addListener(_onProviderUpdate);
+      
+      Future.delayed(const Duration(seconds: 3), () {
+        UpdateService().checkForUpdate(context);
+      });
     });
   }
 
