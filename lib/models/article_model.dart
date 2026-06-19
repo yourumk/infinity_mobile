@@ -1,5 +1,3 @@
-import 'package:shared_preferences/shared_preferences.dart';
-
 class ArticleModel {
   final int id;
   final String name;
@@ -46,18 +44,4 @@ class ArticleModel {
       characteristics: chars,
     );
   }
-
-  // On remet la fonction pour récupérer l'image
-  Future<String?> getImageUrl() async {
-    if (imagePath == null || imagePath!.isEmpty) return null;
-    
-    final prefs = await SharedPreferences.getInstance();
-    final ip = prefs.getString('server_ip');
-    
-    if (ip == null) return null;
-
-    final filename = imagePath!.split(RegExp(r'[/\\]')).last;
-    // Assurez-vous que le port 3000 est bien celui de votre serveur de fichiers
-    return 'http://$ip:3000/$filename';
-  }
-}
+}

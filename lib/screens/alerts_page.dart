@@ -47,6 +47,12 @@ class _AlertsPageState extends State<AlertsPage> with SingleTickerProviderStateM
     _calculateLocalAlerts();
   }
 
+  @override
+  void dispose() {
+    _tabController.dispose();
+    super.dispose();
+  }
+
   // C'EST ICI QUE TOUT CHANGE : Calcul local
   Future<void> _calculateLocalAlerts() async {
     setState(() => _isLoading = true);
@@ -135,7 +141,7 @@ final List<dynamic> allProducts = catalog['products'] ?? [];
                 child: BackdropFilter(
                   filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
                   child: Container(
-                    padding: const EdgeInsets.fromLTRB(15, 50, 15, 15),
+                    padding: const EdgeInsets.fromLTRB(15, 15, 15, 15),
                     decoration: BoxDecoration(
                       color: isDark ? const Color(0xFF1C1C23).withOpacity(0.8) : Colors.white.withOpacity(0.8),
                       border: Border(bottom: BorderSide(color: Colors.white.withOpacity(0.1))),

@@ -1,10 +1,13 @@
 import 'dart:ui';
 import 'dart:async';
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'package:intl/intl.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../core/constants.dart';
 import '../services/api_service.dart';
+import '../widgets/spotlight_search.dart';
 import 'client_details_page.dart';
 import 'supplier_details_page.dart';
 
@@ -26,19 +29,50 @@ class _TiersPageState extends State<TiersPage> {
   Timer? _debounce;
   
   late String _activeTab;
-  List<dynamic> _list = [];
+  List<dynamic> _allList = [];      // 🟢 Liste complète (non filtrée)
+  List<dynamic> _filteredList = [];  // 🟢 Liste affichée (filtrée localement)
   bool _isLoading = true;
+
+  bool _hasClientsPerm = false;
+  bool _hasSuppliersPerm = false;
+  bool _isLoadingRole = true;
 
   @override
   void initState() {
     super.initState();
-    _activeTab = widget.initialTab;
-    _fetchData();
+    _loadPermissions();
 
     // Écoute automatique des mises à jour (Dès qu'on ajoute un tiers, ça refresh)
     _syncSubscription = _api.onDataUpdated.listen((_) {
       if (mounted) _fetchData(isSilent: true);
     });
+  }
+
+  Future<void> _loadPermissions() async {
+    final prefs = await SharedPreferences.getInstance();
+    final role = prefs.getString('user_role') ?? '';
+    if (role == 'admin') {
+      _hasClientsPerm = true;
+      _hasSuppliersPerm = true;
+    } else {
+      final permsString = prefs.getString('user_permissions') ?? '[]';
+      try {
+        final List<dynamic> perms = json.decode(permsString);
+        _hasClientsPerm = perms.contains('mobile_clients');
+        _hasSuppliersPerm = perms.contains('mobile_suppliers');
+      } catch (_) {}
+    }
+
+    if (mounted) {
+      setState(() {
+        _isLoadingRole = false;
+        // 🟢 ISOLATION : Le tab est figé par le paramètre, pas de bascule possible
+        _activeTab = widget.initialTab;
+      });
+      if (_hasClientsPerm || _hasSuppliersPerm) {
+        _fetchData();
+      }
+    }
   }
 
   @override
@@ -54,24 +88,57 @@ class _TiersPageState extends State<TiersPage> {
     if (!isSilent) setState(() => _isLoading = true);
     
     try {
-      // ✅ APPEL OPTIMISTE (Fusionne Local + Serveur)
-      final res = await _api.getTiersWithQueue(_activeTab, _searchController.text);
+      // ✅ APPEL OPTIMISTE (Fusionne Local + Serveur) - Sans filtre pour récupérer TOUT
+      final res = await _api.getTiersWithQueue(_activeTab, '');
       
       if (mounted) {
         setState(() {
-          _list = res;
+          _allList = res;
           _isLoading = false;
         });
+        _applyLocalFilter(); // 🟢 Applique le filtre local après le chargement
       }
     } catch (e) {
-      if (mounted) setState(() => _isLoading = false);
+      if (mounted) {
+        setState(() => _isLoading = false);
+        if (!isSilent) {
+          final apiError = _api.lastError;
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text("⚠️ ${apiError ?? 'Erreur chargement tiers: $e'}"),
+            backgroundColor: Colors.red,
+            duration: const Duration(seconds: 5),
+          ));
+        }
+      }
     }
   }
 
   void _onSearchChanged(String query) {
     if (_debounce?.isActive ?? false) _debounce!.cancel();
-    _debounce = Timer(const Duration(milliseconds: 200), () {
-      _fetchData(isSilent: true);
+    _debounce = Timer(const Duration(milliseconds: 150), () {
+      _applyLocalFilter(); // 🟢 Filtre LOCAL au lieu d'appeler l'API
+    });
+  }
+
+  /// 🟢 FILTRAGE LOCAL INTELLIGENT : Fuzzy matching (tolérance fautes de frappe)
+  void _applyLocalFilter() {
+    final query = _searchController.text.trim();
+    if (query.isEmpty) {
+      setState(() => _filteredList = List.from(_allList));
+      return;
+    }
+    setState(() {
+      _filteredList = FuzzySearchHelper.filter(
+        query: query,
+        items: _allList,
+        getFields: (item) => [
+          (item['name'] ?? '').toString(),
+          (item['phone'] ?? '').toString(),
+          (item['company'] ?? item['address'] ?? '').toString(),
+          (item['email'] ?? '').toString(),
+        ],
+        threshold: 0.35,
+      );
     });
   }
 
@@ -103,6 +170,27 @@ class _TiersPageState extends State<TiersPage> {
 
   @override
   Widget build(BuildContext context) {
+    if (_isLoadingRole) return const Scaffold(body: Center(child: CircularProgressIndicator()));
+    
+    if (!_hasClientsPerm && !_hasSuppliersPerm) {
+      return Scaffold(
+        backgroundColor: Theme.of(context).brightness == Brightness.dark ? const Color(0xFF0F0F13) : const Color(0xFFF2F4F8),
+        appBar: AppBar(title: const Text("Tiers"), backgroundColor: Colors.transparent, elevation: 0),
+        body: Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              const Icon(FontAwesomeIcons.lock, size: 80, color: Colors.grey),
+              const SizedBox(height: 20),
+              const Text("🔒 Accès Refusé", style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: Colors.redAccent)),
+              const SizedBox(height: 10),
+              const Text("Vous n'avez pas la permission\npour voir les clients ou fournisseurs.", textAlign: TextAlign.center, style: TextStyle(color: Colors.grey)),
+            ],
+          ),
+        ),
+      );
+    }
+
     final isDark = Theme.of(context).brightness == Brightness.dark;
     final bgColor = isDark ? const Color(0xFF0F0F13) : const Color(0xFFF2F2F7);
     final isClient = _activeTab == 'clients';
@@ -121,13 +209,30 @@ class _TiersPageState extends State<TiersPage> {
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
+                      Row(
                         children: [
-                          const Text("GESTION", style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: AppColors.accent, letterSpacing: 1.5)),
-                          Text(
-                            "Partenaires", 
-                            style: TextStyle(fontSize: 28, fontWeight: FontWeight.w900, color: isDark ? Colors.white : Colors.black)
+                          // 🛠️ Bouton retour ← comme les autres pages
+                          GestureDetector(
+                            onTap: () => widget.onBack != null ? widget.onBack!() : Navigator.pop(context),
+                            child: Container(
+                              padding: const EdgeInsets.all(10),
+                              margin: const EdgeInsets.only(right: 12),
+                              decoration: BoxDecoration(
+                                color: isDark ? Colors.white.withOpacity(0.08) : Colors.grey.shade200,
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                              child: Icon(Icons.arrow_back_ios_new, size: 18, color: isDark ? Colors.white : Colors.black),
+                            ),
+                          ),
+                          Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Text("GESTION", style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: AppColors.accent, letterSpacing: 1.5)),
+                              Text(
+                                isClient ? "Clients" : "Fournisseurs", 
+                                style: TextStyle(fontSize: 24, fontWeight: FontWeight.w900, color: isDark ? Colors.white : Colors.black)
+                              ),
+                            ],
                           ),
                         ],
                       ),
@@ -148,24 +253,6 @@ class _TiersPageState extends State<TiersPage> {
                     ],
                   ),
                   
-                  const SizedBox(height: 20),
-                  
-                  // --- ONGLETS ---
-                  Container(
-                    height: 50,
-                    padding: const EdgeInsets.all(4),
-                    decoration: BoxDecoration(
-                      color: isDark ? const Color(0xFF1C1C1E) : Colors.white,
-                      borderRadius: BorderRadius.circular(15),
-                      boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.05), blurRadius: 5)]
-                    ),
-                    child: Row(
-                      children: [
-                        _buildSegment("Clients", "clients", isDark),
-                        _buildSegment("Fournisseurs", "suppliers", isDark),
-                      ],
-                    ),
-                  ),
                   const SizedBox(height: 15),
 
                   // --- RECHERCHE ---
@@ -206,7 +293,7 @@ class _TiersPageState extends State<TiersPage> {
             Expanded(
               child: _isLoading 
                 ? const Center(child: CircularProgressIndicator(color: AppColors.primary)) 
-                : _list.isEmpty
+                : _filteredList.isEmpty
                   ? Center(
                       child: Column(
                         mainAxisAlignment: MainAxisAlignment.center,
@@ -222,10 +309,10 @@ class _TiersPageState extends State<TiersPage> {
                     )
                   : ListView.builder(
                     padding: const EdgeInsets.fromLTRB(20, 0, 20, 20), 
-                    itemCount: _list.length,
+                    itemCount: _filteredList.length,
                     physics: const BouncingScrollPhysics(),
                     itemBuilder: (ctx, i) {
-                      final item = _list[i];
+                      final item = _filteredList[i];
                       final balance = double.tryParse(item['balance']?.toString() ?? '0') ?? 0;
                       final isDebt = balance > 0;
                       final name = item['name'] ?? 'Inconnu';
@@ -286,36 +373,6 @@ class _TiersPageState extends State<TiersPage> {
     );
   }
 
-  Widget _buildSegment(String label, String value, bool isDark) {
-    final isActive = _activeTab == value;
-    return Expanded(
-      child: GestureDetector(
-        onTap: () {
-          setState(() {
-            _activeTab = value;
-            _isLoading = true; 
-          });
-          _searchController.clear();
-          _fetchData();
-        },
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 200),
-          alignment: Alignment.center,
-          decoration: BoxDecoration(
-            color: isActive ? AppColors.primary : Colors.transparent,
-            borderRadius: BorderRadius.circular(12),
-          ),
-          child: Text(
-            label,
-            style: TextStyle(
-              fontWeight: FontWeight.bold,
-              color: isActive ? Colors.white : Colors.grey,
-            ),
-          ),
-        ),
-      ),
-    );
-  }
 }
 
 // ==============================================================================

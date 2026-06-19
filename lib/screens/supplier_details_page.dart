@@ -4,7 +4,9 @@ import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'package:intl/intl.dart';
 import '../core/constants.dart';
 import '../services/api_service.dart';
-import 'client_details_page.dart'; // Pour utiliser TransactionDetailSheet et PaymentModal
+import 'client_details_page.dart';
+// 1. AJOUT DE L'IMPORT DU MODAL
+import '../widgets/print_config_modal.dart';
 
 class SupplierDetailsPage extends StatefulWidget {
   final Map<String, dynamic> summary;
@@ -31,6 +33,12 @@ class _SupplierDetailsPageState extends State<SupplierDetailsPage> with SingleTi
     _loadDetails();
   }
 
+  @override
+  void dispose() {
+    _tabController.dispose();
+    super.dispose();
+  }
+
   Future<void> _loadDetails() async {
     if (!mounted) return;
     setState(() => _isLoading = true);
@@ -39,8 +47,6 @@ class _SupplierDetailsPageState extends State<SupplierDetailsPage> with SingleTi
       final freshData = await _api.getTierDetails('supplier', widget.summary['id']);
       if (mounted) {
         setState(() {
-          // On garde les paiements ajoutés localement s'ils existent (astuce avancée)
-          // Pour faire simple ici, on remplace tout par le serveur
           _fullData = { ...widget.summary, ...freshData };
           _currentBalance = double.tryParse(_fullData['balance'].toString()) ?? _currentBalance;
           _isLoading = false;
@@ -60,7 +66,54 @@ class _SupplierDetailsPageState extends State<SupplierDetailsPage> with SingleTi
     );
   }
 
-  // --- MODIFICATION ICI : PAIEMENT OPTIMISTE ---
+  // 2. CORRECTION DE LA FONCTION D'IMPRESSION RAPIDE
+  Future<void> _quickPrint(BuildContext context, String format, String docType, dynamic id) async {
+    // Ouvrir le Modal d'options
+    final config = await showModalBottomSheet<Map<String, dynamic>>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => PrintConfigModal(initialFormat: format),
+    );
+
+    if (config != null && context.mounted) {
+      showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (ctx) => Dialog(
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
+          child: Padding(
+            padding: const EdgeInsets.all(20),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: const [
+                CircularProgressIndicator(),
+                SizedBox(width: 20),
+                Text("Demande au PC...", style: TextStyle(fontWeight: FontWeight.bold)),
+              ],
+            ),
+          ),
+        ),
+      );
+
+      // Appel de la nouvelle fonction magique
+      final success = await _api.printViaPC(
+        config['format'], 
+        docType, 
+        id,
+        options: config
+      );
+
+      if (context.mounted) Navigator.pop(context); // Ferme le loader
+
+      if (!success && context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text("Échec : Le PC de la boutique est-il allumé et connecté ?")),
+        );
+      }
+    }
+  }
+
   void _showPaymentModal() {
     final name = _fullData['name'] ?? 'Fournisseur';
     
@@ -72,38 +125,27 @@ class _SupplierDetailsPageState extends State<SupplierDetailsPage> with SingleTi
         tierName: name,
         color: Colors.orange,
         onConfirm: (amount, note) {
-          // 1. Fermer la fenêtre tout de suite
           Navigator.pop(context);
-
-          // 2. Lancer l'envoi en arrière-plan (Optimiste)
           _api.sendPartnerPaymentOptimistic(
             partnerId: widget.summary['id'],
             amount: amount,
             type: 'SUPPLIER',
             note: note
           );
-
-          // 3. Mettre à jour l'interface INSTANTANÉMENT
           setState(() {
-            // A. Mettre à jour le solde (Dette diminue quand on paie)
             _currentBalance -= amount; 
-
-            // B. Créer un faux objet paiement pour l'affichage
             final newPayment = {
-              'id': 'TEMP', // ID temporaire
+              'id': 'TEMP',
               'date': DateTime.now().toIso8601String(),
               'amount': amount,
               'method': 'Espèce',
               'note': note,
-              'is_local': true // Marqueur pour l'affichage
+              'is_local': true
             };
-
-            // C. L'ajouter en haut de la liste des paiements
             List currentPayments = List.from(_fullData['last_payments'] ?? []);
             currentPayments.insert(0, newPayment);
             _fullData['last_payments'] = currentPayments;
           });
-
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(content: Text("Paiement enregistré !"), backgroundColor: Colors.green, duration: Duration(seconds: 1))
           );
@@ -112,12 +154,12 @@ class _SupplierDetailsPageState extends State<SupplierDetailsPage> with SingleTi
     );
   }
 
-  @override
-  Widget build(BuildContext context) {
-    final isDark = Theme.of(context).brightness == Brightness.dark;
-    final purchases = (_fullData['last_sales'] as List?) ?? [];
-    final payments = (_fullData['last_payments'] as List?) ?? [];
-    final safeName = _fullData['name'] ?? 'Fournisseur';
+@override
+Widget build(BuildContext context) {
+  final isDark = Theme.of(context).brightness == Brightness.dark;
+  final purchases = (_fullData['last_purchases'] as List?) ?? (_fullData['last_sales'] as List?) ?? (_fullData['history_purchases'] as List?) ?? (_fullData['purchases'] as List?) ?? [];
+  final payments = (_fullData['last_payments'] as List?) ?? (_fullData['history_payments'] as List?) ?? (_fullData['payments'] as List?) ?? [];
+  final safeName = _fullData['name'] ?? 'Fournisseur';
 
     return Scaffold(
       backgroundColor: isDark ? const Color(0xFF0F0F13) : const Color(0xFFF2F2F7),
@@ -133,7 +175,6 @@ class _SupplierDetailsPageState extends State<SupplierDetailsPage> with SingleTi
       ),
       body: Column(
         children: [
-          // Header Card Orange
           Container(
             margin: const EdgeInsets.all(20),
             padding: const EdgeInsets.all(20),
@@ -172,8 +213,6 @@ class _SupplierDetailsPageState extends State<SupplierDetailsPage> with SingleTi
               ],
             ),
           ),
-
-          // Tabs
           TabBar(
             controller: _tabController,
             indicatorColor: Colors.orange,
@@ -183,19 +222,26 @@ class _SupplierDetailsPageState extends State<SupplierDetailsPage> with SingleTi
             dividerColor: Colors.transparent,
             tabs: const [ Tab(text: "Historique Achats"), Tab(text: "Paiements") ],
           ),
-
-          Expanded(
+  Expanded(
             child: _isLoading 
               ? const Center(child: CircularProgressIndicator(color: Colors.orange))
               : TabBarView(
                   controller: _tabController,
                   children: [
-                    // ACHATS
                     ListView.builder(
                       padding: const EdgeInsets.all(20),
                       itemCount: purchases.length,
                       itemBuilder: (ctx, i) {
                         final p = purchases[i];
+                        
+                        DateTime? parsedDate;
+                        try {
+                          if (p['date'] != null && p['date'].toString().isNotEmpty) {
+                            parsedDate = DateTime.parse(p['date'].toString());
+                          }
+                        } catch(e) { parsedDate = null; }
+                        final dateStr = parsedDate != null ? DateFormat('dd/MM/yyyy HH:mm').format(parsedDate) : '---';
+
                         return Container(
                           margin: const EdgeInsets.only(bottom: 10),
                           decoration: BoxDecoration(
@@ -209,20 +255,52 @@ class _SupplierDetailsPageState extends State<SupplierDetailsPage> with SingleTi
                                 decoration: BoxDecoration(color: Colors.orange.withOpacity(0.1), shape: BoxShape.circle),
                                 child: const Icon(FontAwesomeIcons.truck, color: Colors.orange, size: 18),
                             ),
-                            title: Text("Bon #${p['number'] ?? p['id']}", style: TextStyle(fontWeight: FontWeight.bold, color: isDark ? Colors.white : Colors.black)),
-                            subtitle: Text(DateFormat('dd/MM/yyyy').format(DateTime.parse(p['date']))),
-                            trailing: const Icon(Icons.arrow_forward_ios, size: 14, color: Colors.grey),
+                           title: Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              children: [
+                                Text("Achat #${p['number'] ?? p['id']}", style: TextStyle(fontWeight: FontWeight.bold, color: isDark ? Colors.white : Colors.black)),
+                                Text("${p['total_amount'] ?? 0} DA", style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.orange)),
+                              ],
+                            ),
+                            subtitle: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(dateStr),
+                                if (p['global_discount'] != null && double.tryParse(p['global_discount'].toString()) != null && double.tryParse(p['global_discount'].toString())! > 0)
+                                  Text("Remise : -${p['global_discount']} DA", style: const TextStyle(color: Colors.green, fontSize: 12, fontWeight: FontWeight.bold)),
+                              ],
+                            ),
+                            trailing: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                IconButton(
+                                  icon: const Icon(FontAwesomeIcons.receipt, size: 18, color: Colors.teal),
+                                  onPressed: () => _quickPrint(context, 'Ticket', 'purchase', p['id']),
+                                ),
+                                IconButton(
+                                  icon: const Icon(FontAwesomeIcons.filePdf, size: 18, color: Colors.redAccent),
+                                  onPressed: () => _quickPrint(context, 'A4', 'purchase', p['id']),
+                                ),
+                              ],
+                            ),
                           ),
                         );
                       },
                     ),
-                    // PAIEMENTS SORTANTS
                     ListView.builder(
                       padding: const EdgeInsets.all(20),
                       itemCount: payments.length,
                       itemBuilder: (ctx, i) {
                         final pay = payments[i];
-                        final isLocal = pay['is_local'] == true; // Vérifie si c'est un ajout récent
+                        final isLocal = pay['is_local'] == true;
+
+                        DateTime? parsedPayDate;
+                        try {
+                          if (pay['date'] != null && pay['date'].toString().isNotEmpty) {
+                            parsedPayDate = DateTime.parse(pay['date'].toString());
+                          }
+                        } catch(e) { parsedPayDate = null; }
+                        final payDateStr = parsedPayDate != null ? DateFormat('dd/MM/yyyy').format(parsedPayDate) : '---';
 
                         return ListTile(
                             leading: isLocal 
@@ -232,8 +310,18 @@ class _SupplierDetailsPageState extends State<SupplierDetailsPage> with SingleTi
                               isLocal ? "Paiement (En cours...)" : "Paiement Sortant", 
                               style: TextStyle(fontWeight: FontWeight.bold, fontStyle: isLocal ? FontStyle.italic : FontStyle.normal)
                             ),
-                            subtitle: Text(DateFormat('dd/MM/yyyy').format(DateTime.parse(pay['date']))),
-                            trailing: Text("-${pay['amount']} DA", style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.red)),
+                            subtitle: Text(payDateStr),
+                            trailing: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Text("-${pay['amount']} DA", style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.red)),
+                                const SizedBox(width: 10),
+                                IconButton(
+                                  icon: const Icon(FontAwesomeIcons.receipt, size: 18, color: Colors.orange),
+                                  onPressed: () => _quickPrint(context, 'Ticket', 'pay_supplier', pay['id']),
+                                ),
+                              ],
+                            ),
                         );
                       },
                     ),

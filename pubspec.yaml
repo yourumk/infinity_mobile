@@ -2,7 +2,7 @@ name: infinity_mobile
 description: Infinity POS Mobile Application.
 publish_to: 'none'
 
-version: 1.0.0+1
+version: 2.0.5+1
 
 environment:
   sdk: '>=3.2.0 <4.0.0'
@@ -11,7 +11,7 @@ dependencies:
   flutter:
     sdk: flutter
   package_info_plus: ^8.0.0  # Pour savoir quelle version est installée
-  ota_update: ^5.1.0         # Pour télécharger et installer la mise à jour  
+  ota_update: ^7.1.0        # Pour télécharger et installer la mise à jour  
 
   # --- SCANNER (Le nouveau, le bon) ---
   ai_barcode_scanner: ^7.1.0
@@ -32,6 +32,8 @@ dependencies:
   provider: ^6.1.1
   http: ^1.2.0
   shared_preferences: ^2.5.4
+  sqflite: ^2.3.0              # 🚀 Moteur de base de données locale
+  path: ^1.8.3                 # 🚀 Requis pour SQLite
 
   # --- INTERFACE & DESIGN ---
   font_awesome_flutter: ^10.7.0
@@ -45,6 +47,17 @@ dependencies:
   open_file: ^3.3.2
   permission_handler: ^11.0.1
   url_launcher: ^6.2.1
+  print_bluetooth_thermal: ^1.1.9
+  image: ^4.5.4
+  esc_pos_utils_plus: ^2.0.4
+  network_info_plus: ^7.0.0
+  geolocator: ^14.0.2
+  flutter_widget_from_html: ^0.17.2
+  flutter_colorpicker: ^1.1.0
+
+  # --- CARTOGRAPHIE & LIVE TRACKING ---
+  flutter_map: ^6.1.0
+  latlong2: ^0.9.0
 
 dev_dependencies:
   flutter_test:
@@ -58,8 +71,8 @@ dev_dependencies:
 flutter:
   uses-material-design: true
 
-  # assets:
-  #   - assets/images/
+  assets:
+    - assets/logo.png
 
 # --- CONFIGURATION DE L'ICÔNE ---
 flutter_icons:

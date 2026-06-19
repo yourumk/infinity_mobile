@@ -2,15 +2,19 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:ui';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart'; // 🟢 AJOUT IMPORTANT POUR LA VIBRATION
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:http/http.dart' as http;
 import 'package:ai_barcode_scanner/ai_barcode_scanner.dart'; 
-
+import 'package:mobile_scanner/mobile_scanner.dart'; // Assure-toi d'avoir cet import pour le controller
+import 'package:shared_preferences/shared_preferences.dart'; // 🟢 AJOUT IMPORTANT
 import '../core/constants.dart';
 import '../services/api_service.dart';
 import '../widgets/glass_card.dart';
+import 'offline_queue_page.dart';
+import 'dart:convert';
 
 class ArticlesPage extends StatefulWidget {
   const ArticlesPage({super.key});
@@ -36,11 +40,14 @@ class _ArticlesPageState extends State<ArticlesPage> {
   String _selectedSubCategory = 'Tout';
   String _activeSmartFilter = 'none';
   bool _isLoading = true;
+  bool _enableTva = false; // 🟢 AJOUT TVA
 
-@override
+  @override
   void initState() {
     super.initState();
     
+    _loadSettings(); // 🟢 Chargement des réglages TVA
+
     // ✅ 1. On s'assure que la synchro tourne
     _api.startAutoSync(); 
 
@@ -55,6 +62,17 @@ class _ArticlesPageState extends State<ArticlesPage> {
       }
     });
   }
+
+  // 🟢 AJOUT : Fonction pour charger le réglage de la TVA
+  Future<void> _loadSettings() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (mounted) {
+      setState(() {
+        _enableTva = prefs.getBool('enable_tva') ?? false;
+      });
+    }
+  }
+
   @override
   void dispose() {
     // IMPORTANT : On coupe l'écoute quand on quitte la page
@@ -63,25 +81,26 @@ class _ArticlesPageState extends State<ArticlesPage> {
     super.dispose();
   }
 
-  Future<void> _fetchCatalog({bool silent = false}) async {
+Future<void> _fetchCatalog({bool silent = false}) async {
     if (!silent) setState(() => _isLoading = true);
     try {
-      final data = await _api.getProductsWithQueue();
+      // ✅ CORRECTION : On utilise getProductsWithQueue qui renvoie {products: [], categories: []}
+      final data = await _api.getProductsWithQueue(); 
+      
       if (mounted) {
         setState(() {
+          // 1. On récupère la liste des produits
           _allProducts = data['products'] ?? [];
+          
           List<dynamic> catsFromPc = data['categories'] ?? [];
-          _categories = ['Tout', ...catsFromPc.map((e) => e.toString())];
+var uniqueCats = catsFromPc.map((e) => e.toString())
+    .where((c) => c.toLowerCase() != 'tout').toSet().toList();
+_categories = ['Tout', ...uniqueCats];
 
-          Set<String> subSet = {};
-          List<dynamic> subsFromPc = data['sub_categories'] ?? [];
-          for(var p in _allProducts) {
-             if(p['sub_category'] != null && p['sub_category'].toString().isNotEmpty) {
-               subSet.add(p['sub_category'].toString());
-             }
-          }
-          for(var s in subsFromPc) subSet.add(s.toString());
-          _subCategories = subSet.toList();
+List<dynamic> subsFromPc = data['sub_categories'] ?? [];
+var uniqueSubs = subsFromPc.map((e) => e.toString())
+    .where((c) => c.toLowerCase() != 'tout').toSet().toList();
+_subCategories = ['Tout', ...uniqueSubs];
           
           _isLoading = false;
           _updateSubCategoryList();
@@ -89,32 +108,36 @@ class _ArticlesPageState extends State<ArticlesPage> {
         });
       }
     } catch (e) {
-      if (mounted) setState(() => _isLoading = false);
+      debugPrint("Erreur Chargement Catalogue: $e");
+      if (mounted) {
+        setState(() => _isLoading = false);
+        if (!silent) {
+          final apiError = _api.lastError;
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text("⚠️ ${apiError ?? 'Erreur de chargement: $e'}"),
+            backgroundColor: Colors.red,
+            duration: const Duration(seconds: 5),
+          ));
+        }
+      }
     }
   }
 
-  Future<void> _scanBarcode(TextEditingController controller, {bool autoSearch = false}) async {
-    await Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (context) => AiBarcodeScanner(
-          onDetect: (BarcodeCapture capture) {
-            final String? scannedValue = capture.barcodes.first.rawValue;
-            if (scannedValue != null) {
-              Navigator.of(context).pop();
-              setState(() {
-                controller.text = scannedValue;
-                if (autoSearch) _applyFilters();
-              });
-            }
-          },
-          controller: MobileScannerController(
-            detectionSpeed: DetectionSpeed.noDuplicates,
-          ),
-        ),
-      ),
+Future<void> _scanBarcode(TextEditingController controller, {bool autoSearch = false}) async {
+    // 🟢 On appelle notre nouvelle page de Scanner Professionnelle
+    final String? scannedCode = await Navigator.of(context).push<String>(
+      MaterialPageRoute(builder: (context) => const AdvancedScannerPage()),
     );
-  }
 
+    // 🟢 Si on a récupéré un code, on l'applique avec une vibration
+    if (scannedCode != null && scannedCode.isNotEmpty) {
+      HapticFeedback.heavyImpact(); // Vibration forte confirmant le succès
+      setState(() {
+        controller.text = scannedCode;
+        if (autoSearch) _applyFilters();
+      });
+    }
+  }
   void _updateSubCategoryList() {
     if (_selectedCategory == 'Tout') {
       _currentSubCategories = [];
@@ -126,23 +149,40 @@ class _ArticlesPageState extends State<ArticlesPage> {
           subSet.add(p['sub_category'].toString());
         }
       }
-      _currentSubCategories = ['Tout', ...subSet.toList()];
+     var filteredSubSet = subSet.where((s) => s.toLowerCase() != 'tout').toList();
+_currentSubCategories = ['Tout', ...filteredSubSet];
     }
     if (!_currentSubCategories.contains(_selectedSubCategory)) {
       _selectedSubCategory = 'Tout';
     }
   }
 
-  void _applyFilters() {
+ void _applyFilters() {
     final query = _searchController.text.toLowerCase().trim();
     List<dynamic> temp = _allProducts.where((p) {
-      final name = (p['name'] ?? '').toString().toLowerCase();
+    final name = (p['name'] ?? '').toString().toLowerCase();
       final ref = (p['ref'] ?? '').toString().toLowerCase();
       final barcode = (p['barcode'] ?? '').toString().toLowerCase();
-      final matchesText = query.isEmpty || name.contains(query) || ref.contains(query) || barcode.contains(query);
+      
+      // 🟢 RECHERCHE MULTI-CODES ET VARIANTES
+      List<dynamic> barcodesList = p['barcodes'] ?? [];
+      bool matchesBarcode = barcode.contains(query) || 
+                            barcodesList.any((b) => b.toString().toLowerCase().contains(query));
+
+      if (!matchesBarcode && p['variants'] != null) {
+          for (var v in p['variants']) {
+              if ((v['barcode'] ?? '').toString().toLowerCase().contains(query) || 
+                  (v['sku'] ?? '').toString().toLowerCase().contains(query)) {
+                  matchesBarcode = true;
+                  break;
+              }
+          }
+      }
+
+      final matchesText = query.isEmpty || name.contains(query) || ref.contains(query) || matchesBarcode;
       bool matchesCategory = true;
       if (_selectedCategory != 'Tout') {
-        final pCat = (p['category'] ?? p['category_name'] ?? '').toString();
+        final pCat = (p['category'] ?? '').toString();
         matchesCategory = pCat == _selectedCategory;
       }
       bool matchesSubCategory = true;
@@ -164,9 +204,11 @@ class _ArticlesPageState extends State<ArticlesPage> {
     }
 
     if (_activeSmartFilter == 'top') {
-      temp.sort((a, b) => (double.tryParse(b['total_sold'].toString()) ?? 0).compareTo(double.tryParse(a['total_sold'].toString()) ?? 0));
+      // Simulé pour l'instant
+       temp.sort((a, b) => (a['name'] ?? '').toString().compareTo(b['name'] ?? ''));
     } else if (_activeSmartFilter == 'new') {
-      temp.sort((a, b) => (int.tryParse(b['id'].toString()) ?? 0).compareTo(int.tryParse(a['id'].toString()) ?? 0));
+       // On inverse la liste pour avoir les derniers ajoutés (si l'API renvoie dans l'ordre)
+       temp = temp.reversed.toList();
     } else {
       temp.sort((a, b) => (a['name'] ?? '').toString().compareTo(b['name'] ?? ''));
     }
@@ -176,8 +218,8 @@ class _ArticlesPageState extends State<ArticlesPage> {
 
   Future<void> _startMagicImageFill() async {
     final missing = _allProducts.where((p) {
-      final id = int.tryParse(p['id'].toString()) ?? -1;
-      if (id <= 0) return false;
+      final id = p['id'].toString();
+      if (id.startsWith('TEMP')) return false; 
       String? img = p['base_image_path']?.toString();
       if (img == null || img == 'null' || img.trim().isEmpty) return true; 
       if (img.startsWith('file://') || img.startsWith('http')) return false; 
@@ -289,12 +331,47 @@ void _openProductSheet(Map<String, dynamic> product) {
         product: product,
         existingCategories: catsForAdd,
         existingSubCategories: _subCategories,
-        onStockUpdate: (id, qty) async {
-          await _api.sendStockUpdate(id, qty, 'SET');
-          _fetchCatalog(silent: true);
+       onStockUpdate: (id, qty) async {
+           _api.saveProduct(
+               id: product['id'].toString(),
+               name: product['name'],
+               price: double.tryParse(product['price'].toString()) ?? 0,
+               cost: double.tryParse(product['cost'].toString()) ?? 0,
+               stock: qty.toDouble(), // <-- Nouveau Stock
+               
+               // 👇 AJOUTS CRITIQUES POUR NE RIEN PERDRE 👇
+               barcode: product['barcode'],
+               reference: product['ref'],
+               category: product['category'] ?? 'Divers',
+               subCategory: product['sub_category'] ?? '',
+               priceSemi: double.tryParse(product['price_semi']?.toString() ?? '0') ?? 0,
+               priceWhol: double.tryParse(product['price_whol']?.toString() ?? '0') ?? 0,
+               packing: double.tryParse(product['packing']?.toString() ?? '1') ?? 1,
+               minStock: double.tryParse(product['min_stock']?.toString() ?? '5') ?? 5,
+               unit: product['unit'] ?? 'U'
+           );
+           _fetchCatalog(silent: true);
         },
-        onProductUpdate: (updatedData) {
-          _api.updateProductOptimistic(updatedData);
+onProductUpdate: (updatedData) async { // 🟢 AJOUT DE async
+          // 🟢 AJOUT DE await ICI
+          await _api.saveProduct(
+            id: updatedData['id'].toString(),
+            name: updatedData['name'],
+            price: double.tryParse(updatedData['price'].toString()) ?? 0,
+            cost: double.tryParse(updatedData['cost'].toString()) ?? 0,
+            stock: double.tryParse(updatedData['stock']?.toString() ?? '0') ?? 0, 
+            barcode: updatedData['barcode'],
+            reference: updatedData['ref'],
+            category: updatedData['category'],
+            subCategory: updatedData['sub_category'],
+            priceSemi: double.tryParse(updatedData['price_semi'].toString()) ?? 0,
+            priceWhol: double.tryParse(updatedData['price_whol'].toString()) ?? 0,
+            packing: double.tryParse(updatedData['packing'].toString()) ?? 1,
+            minStock: double.tryParse(updatedData['min_stock'].toString()) ?? 5,
+            unit: updatedData['unit'],
+            vatPercent: double.tryParse(updatedData['vat_percent']?.toString() ?? product['vat_percent']?.toString() ?? '19.0') ?? 19.0
+          );
+          // 🟢 ON RAFRAÎCHIT SEULEMENT QUAND L'ENVOI EST FINI
           _fetchCatalog(silent: true); 
         },
       ),
@@ -335,6 +412,8 @@ void _openProductSheet(Map<String, dynamic> product) {
 
     return Scaffold(
       backgroundColor: bgColor,
+      extendBody: true,
+      extendBodyBehindAppBar: true,
       body: SafeArea(
         bottom: false,
         child: Column(
@@ -343,13 +422,43 @@ void _openProductSheet(Map<String, dynamic> product) {
               padding: const EdgeInsets.fromLTRB(20, 20, 20, 0),
               child: Column(
                 children: [
-                  Row(
+                 Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
                       Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          const Text("INVENTAIRE", style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.blueAccent, letterSpacing: 1.5)),
+                          Row(
+                            children: [
+                              const Text("INVENTAIRE", style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.blueAccent, letterSpacing: 1.5)),
+                              // ☁️ LE NUAGE ☁️
+                              StreamBuilder<void>(
+                                stream: ApiService().onDataUpdated,
+                                builder: (context, snapshot) {
+                                  final queueCount = ApiService().currentQueue.length;
+                                  if (queueCount == 0) return const SizedBox.shrink(); 
+                                  return GestureDetector(
+                                    onTap: () => showModalBottomSheet(
+                                      context: context, useRootNavigator: true, isScrollControlled: true,
+                                      backgroundColor: Colors.transparent, builder: (_) => OfflineQueuePage(),
+                                    ),
+                                    child: Container(
+                                      margin: const EdgeInsets.only(left: 10),
+                                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                      decoration: BoxDecoration(color: Colors.orange, borderRadius: BorderRadius.circular(10)),
+                                      child: Row(
+                                        children: [
+                                          const Icon(Icons.cloud_upload, color: Colors.white, size: 12),
+                                          const SizedBox(width: 4),
+                                          Text('$queueCount', style: const TextStyle(fontSize: 12, color: Colors.white, fontWeight: FontWeight.bold)),
+                                        ],
+                                      ),
+                                    ),
+                                  );
+                                }
+                              ),
+                            ],
+                          ),
                           Text("Produits", style: TextStyle(fontSize: 28, fontWeight: FontWeight.w900, color: isDark ? Colors.white : Colors.black)),
                         ],
                       ),
@@ -396,6 +505,7 @@ void _openProductSheet(Map<String, dynamic> product) {
                         ),
                         border: InputBorder.none,
                         contentPadding: const EdgeInsets.symmetric(vertical: 13),
+                        isDense: true,
                       ),
                     ),
                   ),
@@ -484,47 +594,52 @@ void _openProductSheet(Map<String, dynamic> product) {
                     color: AppColors.primary,
                     child: _filteredProducts.isEmpty 
                       ? Center(child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [Icon(Icons.search_off, size: 50, color: Colors.grey.withOpacity(0.3)), const SizedBox(height: 10), Text("Aucun article trouvé", style: TextStyle(color: Colors.grey[500]))]))
-                      : ListView.builder(
+                     : ListView.builder(
                           padding: const EdgeInsets.fromLTRB(20, 10, 20, 80),
                           physics: const BouncingScrollPhysics(),
                           itemCount: _filteredProducts.length,
                           itemBuilder: (ctx, i) {
-                            final p = Map<String, dynamic>.from(_filteredProducts[i] as Map);
+                           final p = Map<String, dynamic>.from(_filteredProducts[i] as Map);
                             final stock = double.tryParse(p['stock']?.toString() ?? '0') ?? 0;
-                            final price = double.tryParse(p['price']?.toString() ?? '0') ?? 0;
+                            final htPrice = double.tryParse(p['price']?.toString() ?? '0') ?? 0;
+                            final vat = double.tryParse(p['vat_percent']?.toString() ?? '0') ?? 0;
+                            final price = _enableTva && vat > 0 ? htPrice * (1 + (vat / 100)) : htPrice;
                             final minStock = double.tryParse(p['min_stock']?.toString() ?? '5') ?? 5;
                             final isFav = (int.tryParse(p['is_favorite']?.toString() ?? '0') ?? 0) == 1;
                             final isLow = stock <= minStock;
                             final totalSold = int.tryParse(p['total_sold']?.toString() ?? '0') ?? 0;
-                            final imgUrl = p['base_image_path'];
 
                             return Padding(
                               padding: const EdgeInsets.only(bottom: 12),
                               child: GestureDetector(
                                 onTap: () => _openProductSheet(p),
-                                child: GlassCard(
+                               child: GlassCard(
                                   isDark: isDark,
                                   padding: const EdgeInsets.all(12),
                                   borderRadius: 18,
                                   child: Row(
+                                    crossAxisAlignment: CrossAxisAlignment.center, 
                                     children: [
-                                      Container(
-                                        width: 55, height: 55,
-                                        decoration: BoxDecoration(
-                                          color: isLow ? Colors.red.withOpacity(0.1) : Colors.blue.withOpacity(0.1), 
-                                          borderRadius: BorderRadius.circular(15),
-                                          image: (imgUrl != null && imgUrl.toString().length > 2)
-                                            ? DecorationImage(
-                                                image: (imgUrl.toString().startsWith('http')) 
-                                                  ? NetworkImage(imgUrl) as ImageProvider 
-                                                  : FileImage(File(imgUrl)),              
-                                              fit: BoxFit.cover
-                                            ) 
-                                            : null
-                                        ),
-                                        child: (imgUrl == null || imgUrl.toString().length <= 2) 
-                                          ? Icon(isLow ? FontAwesomeIcons.triangleExclamation : FontAwesomeIcons.boxOpen, color: isLow ? Colors.red : Colors.blue, size: 22)
-                                          : null,
+                                   Builder(
+                                        builder: (context) {
+                                          final cleanUrl = ApiService.getCleanImageUrl(p['base_image_path']);
+                                          return Container(
+                                            width: 55, height: 55,
+                                            decoration: BoxDecoration(
+                                              color: isLow ? Colors.red.withOpacity(0.1) : Colors.blue.withOpacity(0.1), 
+                                              borderRadius: BorderRadius.circular(15),
+                                              image: cleanUrl != null
+                                                  ? DecorationImage(
+                                                      image: NetworkImage(cleanUrl),
+                                                      fit: BoxFit.cover,
+                                                    )
+                                                  : null,
+                                            ),
+                                            child: cleanUrl == null
+                                                ? Icon(isLow ? FontAwesomeIcons.triangleExclamation : FontAwesomeIcons.boxOpen, color: isLow ? Colors.red : Colors.blue, size: 22)
+                                                : null,
+                                          );
+                                        }
                                       ),
                                       const SizedBox(width: 15),
                                       Expanded(
@@ -538,9 +653,16 @@ void _openProductSheet(Map<String, dynamic> product) {
                                               ],
                                             ),
                                             const SizedBox(height: 4),
+                                            // 🟢 CORRECTION DE L'OVERFLOW ICI (Expanded + TextOverflow)
                                             Row(children: [
-                                                Text("${p['category'] ?? 'Divers'}", style: const TextStyle(color: Colors.grey, fontSize: 12)),
-                                                if (p['sub_category'] != null) Text(" > ${p['sub_category']}", style: TextStyle(color: Colors.grey[500], fontSize: 11)),
+                                                Expanded(
+                                                  child: Text(
+                                                    "${p['category'] ?? 'Divers'}${p['sub_category'] != null && p['sub_category'].toString().isNotEmpty ? ' > ' + p['sub_category'].toString() : ''}", 
+                                                    style: const TextStyle(color: Colors.grey, fontSize: 12),
+                                                    maxLines: 1, 
+                                                    overflow: TextOverflow.ellipsis
+                                                  ),
+                                                ),
                                                 if (totalSold > 50) ...[const SizedBox(width: 5), Container(padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1), decoration: BoxDecoration(color: Colors.orange.withOpacity(0.2), borderRadius: BorderRadius.circular(4)), child: const Text("Top", style: TextStyle(fontSize: 9, color: Colors.orange, fontWeight: FontWeight.bold)))]
                                             ])
                                           ],
@@ -601,14 +723,16 @@ class _AddProductModalState extends State<AddProductModal> with SingleTickerProv
   final _barcodeCtrl = TextEditingController();
   final _catCtrl = TextEditingController();
   final _subCatCtrl = TextEditingController();
-  final _costCtrl = TextEditingController();       
-  final _priceCtrl = TextEditingController();      
-  final _priceSemiCtrl = TextEditingController();  
-  final _priceWholCtrl = TextEditingController();  
+  final _costCtrl = TextEditingController();        
+  final _priceCtrl = TextEditingController();       
+  final _priceSemiCtrl = TextEditingController();   
+  final _priceWholCtrl = TextEditingController();   
   final _stockCtrl = TextEditingController();
   final _minStockCtrl = TextEditingController(text: '5');
   final _unitCtrl = TextEditingController(text: 'u');
   final _packingCtrl = TextEditingController(text: '1');
+  
+  double _vatPercent = 0.0; // 🟢 Modifié : 0% par défaut
   
   DateTime? _expirationDate;
   final _warehouseCtrl = TextEditingController();
@@ -660,74 +784,51 @@ class _AddProductModalState extends State<AddProductModal> with SingleTickerProv
     }
   }
 
-  Future<void> _scan(TextEditingController ctrl) async {
-    await Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (context) => AiBarcodeScanner(
-          onDetect: (BarcodeCapture capture) {
-            final String? scannedValue = capture.barcodes.first.rawValue;
-            if (scannedValue != null) {
-              Navigator.of(context).pop();
-              setState(() {
-                 ctrl.text = scannedValue;
-              });
-            }
-          },
-          controller: MobileScannerController(
-            detectionSpeed: DetectionSpeed.noDuplicates,
-          ),
-        ),
-      ),
+Future<void> _scan(TextEditingController ctrl) async {
+    final String? scannedCode = await Navigator.of(context).push<String>(
+      MaterialPageRoute(builder: (context) => const AdvancedScannerPage()),
     );
+
+    if (scannedCode != null && scannedCode.isNotEmpty) {
+      HapticFeedback.heavyImpact();
+      setState(() {
+        ctrl.text = scannedCode;
+      });
+    }
   }
 
-  Future<void> _submit() async {
+Future<void> _submit() async {
     if (!_formKey.currentState!.validate()) return;
     
-    // On prépare la liste des emplacements
-    List<Map<String, dynamic>> locations = [];
-    if (_warehouseCtrl.text.isNotEmpty || _aisleCtrl.text.isNotEmpty) {
-      locations.add({'warehouse': _warehouseCtrl.text, 'aisle': _aisleCtrl.text, 'shelf': _shelfCtrl.text});
-    }
-
-    // 1. GÉNÉRATION DE L'ID TEMPORAIRE ICI (Pour lier l'image au produit)
     final String tempId = "TEMP-${DateTime.now().millisecondsSinceEpoch}";
 
-    // 2. On prépare l'objet avec cet ID
-    final newProduct = {
-      "id": tempId, // <--- IMPORTANT : On force l'ID
-      "name": _nameCtrl.text.trim(),
-      "price": double.tryParse(_priceCtrl.text) ?? 0,
-      "cost": double.tryParse(_costCtrl.text) ?? 0,
-      "stock": double.tryParse(_stockCtrl.text) ?? 0,
-      "barcode": _barcodeCtrl.text.trim(),
-      "ref": _refCtrl.text.trim(),
-      "category": _catCtrl.text.trim(),
-      "sub_category": _subCatCtrl.text.trim(),
-      "price_semi": double.tryParse(_priceSemiCtrl.text) ?? 0,
-      "price_whol": double.tryParse(_priceWholCtrl.text) ?? 0,
-      "unit": _unitCtrl.text.trim(),
-      "packing": double.tryParse(_packingCtrl.text) ?? 1,
-      "min_stock": double.tryParse(_minStockCtrl.text) ?? 5,
-      "expiration_date": _expirationDate?.toIso8601String().split('T')[0],
-      "locations": locations,
-      "characteristics": [],
-      "variants": []
-    };
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Sauvegarde en cours..."), duration: Duration(seconds: 1)));
 
-    // 3. Ajout Instantané (Optimiste)
-    widget.api.addProductOptimistic(newProduct);
+    await widget.api.saveProduct(
+      id: tempId, 
+      name: _nameCtrl.text.trim(),
+      price: double.tryParse(_priceCtrl.text) ?? 0,
+      cost: double.tryParse(_costCtrl.text) ?? 0,
+      stock: double.tryParse(_stockCtrl.text) ?? 0,
+      barcode: _barcodeCtrl.text.trim(),
+      reference: _refCtrl.text.trim(),
+      category: _catCtrl.text.trim(),
+      subCategory: _subCatCtrl.text.trim(),
+      priceSemi: double.tryParse(_priceSemiCtrl.text) ?? 0,
+      priceWhol: double.tryParse(_priceWholCtrl.text) ?? 0,
+      unit: _unitCtrl.text.trim(),
+      packing: double.tryParse(_packingCtrl.text) ?? 1,
+      minStock: double.tryParse(_minStockCtrl.text) ?? 5,
+      vatPercent: _vatPercent 
+    );
     
-    // 4. Gestion Image locale (On utilise le tempId créé plus haut)
     if (_imageFile != null) {
-      // On lie l'image au bon ID temporaire
-      ApiService().updateProductImage(tempId, _imageFile!); 
+      await ApiService().updateProductImage(tempId, _imageFile!); 
     }
 
-    // 5. Fermeture immédiate
     if (mounted) {
-      Navigator.pop(context); // Ferme le modal
-      widget.onSuccess(); // Rafraîchit la liste derrière
+      Navigator.pop(context); 
+      widget.onSuccess(); 
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Produit ajouté !"), backgroundColor: Colors.green));
     }
   }
@@ -830,14 +931,27 @@ class _AddProductModalState extends State<AddProductModal> with SingleTickerProv
     ]);
   }
 
-  Widget _buildPricesTab(bool isDark) {
+Widget _buildPricesTab(bool isDark) {
     return ListView(padding: const EdgeInsets.all(20), children: [
       _buildInput("Prix Achat (HT)", Icons.money_off, _costCtrl, isDark, isNum: true),
-      _buildInput("Prix Détail (TTC)", Icons.person, _priceCtrl, isDark, isNum: true),
+      _buildInput("Prix Détail (HT)", Icons.person, _priceCtrl, isDark, isNum: true),
       Row(children: [Expanded(child: _buildInput("P. Semi-Gros", Icons.store, _priceSemiCtrl, isDark, isNum: true)), const SizedBox(width: 15), Expanded(child: _buildInput("P. Gros", Icons.local_shipping, _priceWholCtrl, isDark, isNum: true))]),
+      const SizedBox(height: 10),
+      DropdownButtonFormField<double>(
+        value: _vatPercent,
+        dropdownColor: isDark ? const Color(0xFF2C2C35) : Colors.white,
+        decoration: InputDecoration(
+          labelText: "Taux de TVA (%)",
+          prefixIcon: const Icon(Icons.percent, color: AppColors.primary),
+          filled: true,
+          fillColor: isDark ? Colors.white.withOpacity(0.05) : Colors.grey[100],
+          border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide.none),
+        ),
+        items: [0.0, 9.0, 19.0].map((v) => DropdownMenuItem(value: v, child: Text("${v.toInt()}%", style: TextStyle(color: isDark ? Colors.white : Colors.black)))).toList(),
+        onChanged: (val) => setState(() => _vatPercent = val!),
+      )
     ]);
   }
-
   Widget _buildStockTab(bool isDark) {
     return ListView(padding: const EdgeInsets.all(20), children: [
       Row(children: [Expanded(child: _buildInput("Stock Initial", Icons.inventory_2, _stockCtrl, isDark, isNum: true)), const SizedBox(width: 15), Expanded(child: _buildInput("Alerte Min", Icons.warning, _minStockCtrl, isDark, isNum: true))]),
@@ -935,7 +1049,9 @@ class _ProductDetailsSheetState extends State<ProductDetailsSheet> with SingleTi
   late TextEditingController _nameCtrl, _refCtrl, _barcodeCtrl, _catCtrl, _subCatCtrl;
   late TextEditingController _costCtrl, _priceCtrl, _priceSemiCtrl, _priceWholCtrl;
   late TextEditingController _minStockCtrl, _unitCtrl, _packingCtrl;
-  late TextEditingController _warehouseCtrl, _aisleCtrl, _shelfCtrl;
+late TextEditingController _warehouseCtrl, _aisleCtrl, _shelfCtrl;
+
+  double _vatPercent = 0.0; // 🟢 AJOUT DE LA VARIABLE TVA
 
   File? _newImageFile; 
   final ImagePicker _picker = ImagePicker();
@@ -957,9 +1073,11 @@ class _ProductDetailsSheetState extends State<ProductDetailsSheet> with SingleTi
     _priceSemiCtrl = TextEditingController(text: p['price_semi']?.toString() ?? '0');
     _priceWholCtrl = TextEditingController(text: p['price_whol']?.toString() ?? '0');
 
-    _minStockCtrl = TextEditingController(text: p['min_stock']?.toString() ?? '5');
+  _minStockCtrl = TextEditingController(text: p['min_stock']?.toString() ?? '5');
     _unitCtrl = TextEditingController(text: p['unit'] ?? 'u');
     _packingCtrl = TextEditingController(text: p['packing']?.toString() ?? '1');
+    
+    _vatPercent = double.tryParse(p['vat_percent']?.toString() ?? '0') ?? 0.0; // 🟢 LECTURE TVA DU PRODUIT
 
     List locs = (p['locations'] is List) ? p['locations'] : [];
     var firstLoc = locs.isNotEmpty ? locs[0] : {};
@@ -985,26 +1103,18 @@ class _ProductDetailsSheetState extends State<ProductDetailsSheet> with SingleTi
     ));
   }
 
-  // Fonction Scan pour la modification
+// Fonction Scan pour la modification
   Future<void> _scan(TextEditingController ctrl) async {
-    await Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (context) => AiBarcodeScanner(
-          onDetect: (BarcodeCapture capture) {
-            final String? scannedValue = capture.barcodes.first.rawValue;
-            if (scannedValue != null) {
-              Navigator.of(context).pop();
-              setState(() {
-                 ctrl.text = scannedValue;
-              });
-            }
-          },
-          controller: MobileScannerController(
-            detectionSpeed: DetectionSpeed.noDuplicates,
-          ),
-        ),
-      ),
+    final String? scannedCode = await Navigator.of(context).push<String>(
+      MaterialPageRoute(builder: (context) => const AdvancedScannerPage()),
     );
+
+    if (scannedCode != null && scannedCode.isNotEmpty) {
+      HapticFeedback.heavyImpact();
+      setState(() {
+        ctrl.text = scannedCode;
+      });
+    }
   }
 
   @override
@@ -1017,9 +1127,13 @@ class _ProductDetailsSheetState extends State<ProductDetailsSheet> with SingleTi
     super.dispose();
   }
 
-  void _saveChanges() {
+ // 🟢 AJOUT DE async ICI
+  Future<void> _saveChanges() async {
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Mise à jour en cours..."), duration: Duration(seconds: 1)));
+
+    // 🟢 AJOUT DE await ICI POUR ATTENDRE LA NOUVELLE PHOTO
     if (_newImageFile != null) {
-      ApiService().updateProductImage(widget.product['id'], _newImageFile!);
+      await ApiService().updateProductImage(widget.product['id'], _newImageFile!);
     }
 
     List<Map<String, dynamic>> locs = [];
@@ -1030,6 +1144,7 @@ class _ProductDetailsSheetState extends State<ProductDetailsSheet> with SingleTi
     final updatedData = {
       "id": widget.product['id'],
       "name": _nameCtrl.text.trim(),
+      "stock": widget.product['stock'],
       "category": _catCtrl.text.trim(),
       "sub_category": _subCatCtrl.text.trim(),
       "barcode": _barcodeCtrl.text.trim(),
@@ -1041,15 +1156,18 @@ class _ProductDetailsSheetState extends State<ProductDetailsSheet> with SingleTi
       "min_stock": double.tryParse(_minStockCtrl.text) ?? 5,
       "unit": _unitCtrl.text.trim(),
       "packing": double.tryParse(_packingCtrl.text) ?? 1,
+      "vat_percent": _vatPercent, 
       "locations": locs,
       "characteristics": widget.product['characteristics'],
       "variants": widget.product['variants']
     };
     
     widget.onProductUpdate(updatedData);
-    Navigator.pop(context);
+    
+    if (mounted) {
+      Navigator.pop(context);
+    }
   }
-
   void _showStockCorrectionDialog() {
     final controller = TextEditingController();
     showDialog(
@@ -1069,7 +1187,7 @@ class _ProductDetailsSheetState extends State<ProductDetailsSheet> with SingleTi
             onPressed: () {
               double? qty = double.tryParse(controller.text);
               if (qty != null) {
-                widget.onStockUpdate(widget.product['id'], qty);
+                widget.onStockUpdate(int.parse(widget.product['id'].toString()), qty);
                 Navigator.pop(ctx); Navigator.pop(context); 
               }
             },
@@ -1138,18 +1256,7 @@ class _ProductDetailsSheetState extends State<ProductDetailsSheet> with SingleTi
     final cost = double.tryParse(p['cost']?.toString() ?? '0') ?? 0;
     final margin = price - cost;
     final marginPercent = price > 0 ? (margin / price * 100) : 0;
-
-    final String? imgPath = p['base_image_path']?.toString();
-    final bool hasImage = imgPath != null && imgPath.length > 2;
-
-    ImageProvider? imageProvider;
-    if (hasImage) {
-       if (imgPath!.startsWith('http')) {
-         imageProvider = NetworkImage(imgPath);
-       } else {
-         imageProvider = FileImage(File(imgPath));
-       }
-    }
+final cleanUrl = ApiService.getCleanImageUrl(p['base_image_path']);
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -1161,11 +1268,11 @@ class _ProductDetailsSheetState extends State<ProductDetailsSheet> with SingleTi
             decoration: BoxDecoration(
               borderRadius: BorderRadius.circular(15),
               color: Colors.grey[200],
-              image: imageProvider != null 
-                ? DecorationImage(image: imageProvider, fit: BoxFit.cover) 
+              image: cleanUrl != null 
+                ? DecorationImage(image: NetworkImage(cleanUrl), fit: BoxFit.cover) 
                 : null
             ),
-            child: imageProvider == null
+            child: cleanUrl == null
               ? const Icon(Icons.image, size: 40, color: Colors.grey)
               : null,
           ),
@@ -1196,7 +1303,7 @@ class _ProductDetailsSheetState extends State<ProductDetailsSheet> with SingleTi
 
   Widget _buildViewStock(bool isDark) {
     final p = widget.product;
-    final stock = double.tryParse(p['stock']?.toString() ?? '0') ?? 0;
+    final stock = double.tryParse(p['stock_total']?.toString() ?? p['stock']?.toString() ?? '0') ?? 0;
     final variants = List.from(p['variants'] ?? []);
 
     return Column(
@@ -1222,17 +1329,30 @@ class _ProductDetailsSheetState extends State<ProductDetailsSheet> with SingleTi
         const SizedBox(height: 10),
         _buildStatRow("Alerte Min", "${p['min_stock'] ?? 5}", "Expiration", p['expiration_date'] ?? '-', isDark),
         
-        if (variants.isNotEmpty) ...[
+if (variants.isNotEmpty) ...[
           const SizedBox(height: 25),
           _buildSectionTitle("Variantes (${variants.length})"),
           Container(
             decoration: BoxDecoration(color: isDark ? Colors.white10 : Colors.white, borderRadius: BorderRadius.circular(15), border: Border.all(color: Colors.grey.withOpacity(0.2))),
-            child: Column(children: variants.map<Widget>((v) => ListTile(
-              title: Text(v['sku'] ?? 'Variante', style: TextStyle(color: isDark ? Colors.white : Colors.black, fontWeight: FontWeight.bold)),
-              subtitle: Text("Stock: ${v['stock']}", style: TextStyle(color: isDark ? Colors.white60 : Colors.grey)),
-              trailing: Text("${v['price']} DA", style: TextStyle(fontWeight: FontWeight.bold, color: AppColors.primary, fontSize: 15)),
-              dense: true,
-            )).toList()),
+            child: Column(children: variants.map<Widget>((v) {
+              
+              // Décodage JSON pour l'affichage de la fiche
+              String optLabel = v['sku'] ?? 'Variante';
+              try {
+                if (v['options'] != null) {
+                  Map<String, dynamic> opts = v['options'] is String ? jsonDecode(v['options']) : v['options'];
+                  if (opts.isNotEmpty) optLabel = opts.entries.map((e) => "${e.key}: ${e.value}").join(' | ');
+                }
+              } catch(e) {}
+
+              return ListTile(
+                leading: const Icon(Icons.style, color: AppColors.primary, size: 20),
+                title: Text(optLabel, style: TextStyle(color: isDark ? Colors.white : Colors.black, fontWeight: FontWeight.bold)),
+                subtitle: Text("Stock: ${v['stock']}", style: TextStyle(color: isDark ? Colors.white60 : Colors.grey)),
+                trailing: Text("${v['price']} DA", style: TextStyle(fontWeight: FontWeight.bold, color: AppColors.primary, fontSize: 15)),
+                dense: true,
+              );
+            }).toList()),
           )
         ]
       ],
@@ -1258,20 +1378,14 @@ class _ProductDetailsSheetState extends State<ProductDetailsSheet> with SingleTi
     );
   }
 
-  // --- MODE EDITION ---
-  Widget _buildEditInfo(bool isDark) {
-    final String? existingImgPath = widget.product['base_image_path']?.toString();
-    final bool hasExistingImage = existingImgPath != null && existingImgPath.length > 2;
+ Widget _buildEditInfo(bool isDark) {
+    final cleanUrl = ApiService.getCleanImageUrl(widget.product['base_image_path']);
 
     ImageProvider? bgImage;
     if (_newImageFile != null) {
       bgImage = FileImage(_newImageFile!); 
-    } else if (hasExistingImage) {
-      if (existingImgPath!.startsWith('http')) {
-        bgImage = NetworkImage(existingImgPath);
-      } else {
-        bgImage = FileImage(File(existingImgPath));
-      }
+    } else if (cleanUrl != null) {
+      bgImage = NetworkImage(cleanUrl);
     }
 
     return Column(children: [
@@ -1308,10 +1422,24 @@ class _ProductDetailsSheetState extends State<ProductDetailsSheet> with SingleTi
       
       _buildInput("Catégorie", Icons.category, _catCtrl, isDark, suggestions: widget.existingCategories),
       _buildInput("Sous-Catégorie", Icons.subdirectory_arrow_right, _subCatCtrl, isDark, suggestions: widget.existingSubCategories),
-      
-      const Divider(height: 30),
-      Row(children: [Expanded(child: _buildInput("Achat (HT)", Icons.money_off, _costCtrl, isDark, isNum: true)), const SizedBox(width: 10), Expanded(child: _buildInput("Vente (Détail)", Icons.person, _priceCtrl, isDark, isNum: true))]),
+  const Divider(height: 30),
+      Row(children: [Expanded(child: _buildInput("Achat (HT)", Icons.money_off, _costCtrl, isDark, isNum: true)), const SizedBox(width: 10), Expanded(child: _buildInput("Vente HT", Icons.person, _priceCtrl, isDark, isNum: true))]),
       Row(children: [Expanded(child: _buildInput("Semi-Gros", Icons.store, _priceSemiCtrl, isDark, isNum: true)), const SizedBox(width: 10), Expanded(child: _buildInput("Gros", Icons.local_shipping, _priceWholCtrl, isDark, isNum: true))]),
+      const SizedBox(height: 10),
+      // 🟢 AJOUT DU MENU DÉROULANT TVA SUR L'INTERFACE
+      DropdownButtonFormField<double>(
+        value: [0.0, 9.0, 19.0].contains(_vatPercent) ? _vatPercent : 0.0,
+        dropdownColor: isDark ? const Color(0xFF2C2C35) : Colors.white,
+        decoration: InputDecoration(
+          labelText: "Taux de TVA (%)",
+          prefixIcon: const Icon(Icons.percent, color: AppColors.primary),
+          filled: true,
+          fillColor: isDark ? Colors.white.withOpacity(0.05) : Colors.grey[100],
+          border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide.none),
+        ),
+        items: [0.0, 9.0, 19.0].map((v) => DropdownMenuItem(value: v, child: Text("${v.toInt()}%", style: TextStyle(color: isDark ? Colors.white : Colors.black)))).toList(),
+        onChanged: (val) => setState(() => _vatPercent = val ?? 0.0),
+      ),
     ]);
   }
 
@@ -1394,6 +1522,252 @@ class _ProductDetailsSheetState extends State<ProductDetailsSheet> with SingleTi
     return Container(
       padding: const EdgeInsets.all(15), decoration: BoxDecoration(color: isDark ? const Color(0xFF2C2C35) : Colors.white, borderRadius: BorderRadius.circular(15), border: Border.all(color: color.withOpacity(0.3)), boxShadow: [BoxShadow(color: color.withOpacity(0.1), blurRadius: 5, offset: const Offset(0, 2))]),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text(label, style: TextStyle(fontSize: 11, color: isDark ? Colors.white60 : Colors.grey[600], fontWeight: FontWeight.w600)), const SizedBox(height: 4), Text(value, style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: color))]),
+    );
+  }
+}
+// ==============================================================================
+// 🌟 SCANNER PRO: AVEC LASER ANIMÉ, FLASH, ZOOM ET SAISIE MANUELLE
+// ==============================================================================
+class AdvancedScannerPage extends StatefulWidget {
+  const AdvancedScannerPage({super.key});
+
+  @override
+  State<AdvancedScannerPage> createState() => _AdvancedScannerPageState();
+}
+
+class _AdvancedScannerPageState extends State<AdvancedScannerPage> with SingleTickerProviderStateMixin {
+  late MobileScannerController _cameraController;
+  late AnimationController _animationController;
+  bool _isFlashOn = false;
+  bool _isScanned = false;
+
+  @override
+  void initState() {
+    super.initState();
+    // Vitesse de détection instantanée mais sans doublons
+    _cameraController = MobileScannerController(detectionSpeed: DetectionSpeed.noDuplicates);
+    
+    // Animation fluide du laser (qui monte et descend)
+    _animationController = AnimationController(vsync: this, duration: const Duration(seconds: 2))..repeat(reverse: true);
+  }
+
+  @override
+  void dispose() {
+    _cameraController.dispose();
+    _animationController.dispose();
+    super.dispose();
+  }
+
+  void _onDetect(BarcodeCapture capture) {
+    if (_isScanned) return;
+    final String? code = capture.barcodes.first.rawValue;
+    if (code != null) {
+      _isScanned = true;
+      Navigator.pop(context, code); // Retourne le code à la page principale
+    }
+  }
+
+  // ⌨️ OPTION : Saisie manuelle si l'étiquette est détruite
+  void _openManualEntry() {
+    final TextEditingController manualCtrl = TextEditingController();
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: const Text("Saisie Manuelle", style: TextStyle(fontWeight: FontWeight.bold)),
+        content: TextField(
+          controller: manualCtrl,
+          keyboardType: TextInputType.number,
+          autofocus: true,
+          decoration: InputDecoration(
+            hintText: "Entrez les chiffres du code",
+            prefixIcon: const Icon(Icons.keyboard, color: Colors.orange),
+            filled: true,
+            fillColor: Colors.grey[100],
+            border: OutlineInputBorder(borderRadius: BorderRadius.circular(15), borderSide: BorderSide.none),
+          ),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("Annuler")),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.orange, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10))),
+            onPressed: () {
+              if (manualCtrl.text.isNotEmpty) {
+                Navigator.pop(ctx); // Ferme la popup
+                Navigator.pop(context, manualCtrl.text.trim()); // Retourne le code au scanner
+              }
+            },
+            child: const Text("Valider", style: TextStyle(color: Colors.white)),
+          )
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.black,
+      body: Stack(
+        children: [
+          // 1. LA CAMÉRA (Fond d'écran)
+          MobileScanner(
+            controller: _cameraController,
+            onDetect: _onDetect,
+          ),
+          
+          // 2. LE MASQUE SOMBRE AVEC LE TROU TRANSPARENT
+          ColorFiltered(
+            colorFilter: ColorFilter.mode(Colors.black.withOpacity(0.7), BlendMode.srcOut),
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                Container(
+                  decoration: const BoxDecoration(color: Colors.black, backgroundBlendMode: BlendMode.dstOut),
+                ),
+                Center(
+                  child: Container(
+                    width: 280, height: 180,
+                    decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(20)),
+                  ),
+                ),
+              ],
+            ),
+          ),
+
+          // 3. LE LASER ANIMÉ (Sci-Fi)
+          Center(
+            child: SizedBox(
+              width: 280, height: 180,
+              child: AnimatedBuilder(
+                animation: _animationController,
+                builder: (context, child) {
+                  return Stack(
+                    children: [
+                      Positioned(
+                        top: (180 - 4) * _animationController.value,
+                        left: 10, right: 10,
+                        child: Container(
+                          height: 3,
+                          decoration: BoxDecoration(
+                            color: Colors.orangeAccent,
+                            boxShadow: [BoxShadow(color: Colors.orangeAccent.withOpacity(0.8), blurRadius: 15, spreadRadius: 3)],
+                          ),
+                        ),
+                      ),
+                    ],
+                  );
+                },
+              ),
+            ),
+          ),
+
+          // 4. LE CADRE DESIGN
+          Center(
+            child: Container(
+              width: 280, height: 180,
+              decoration: BoxDecoration(
+                border: Border.all(color: Colors.orange.withOpacity(0.5), width: 2),
+                borderRadius: BorderRadius.circular(20),
+              ),
+            ),
+          ),
+
+          // 5. EN TÊTE (Bouton retour)
+          Positioned(
+            top: 50, left: 20, right: 20,
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                GestureDetector(
+                  onTap: () => Navigator.pop(context),
+                  child: Container(padding: const EdgeInsets.all(10), decoration: BoxDecoration(color: Colors.white.withOpacity(0.2), shape: BoxShape.circle), child: const Icon(Icons.arrow_back_ios_new, color: Colors.white, size: 20)),
+                ),
+                const Text("Scan Produit", style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold, letterSpacing: 1)),
+                const SizedBox(width: 40), // Espacement pour centrer le titre
+              ],
+            ),
+          ),
+
+          // 6. BARRE D'OUTILS BAS (Flash, Manuel, Galerie)
+          Positioned(
+            bottom: 50, left: 30, right: 30,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 15),
+              decoration: BoxDecoration(
+                color: Colors.white.withOpacity(0.15),
+                borderRadius: BorderRadius.circular(30),
+                border: Border.all(color: Colors.white.withOpacity(0.2)),
+              ),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  // BOUTON FLASH
+                  _buildToolBtn(
+                    icon: _isFlashOn ? Icons.flash_on : Icons.flash_off,
+                    label: "Flash",
+                    isActive: _isFlashOn,
+                    onTap: () {
+                      _cameraController.toggleTorch();
+                      setState(() => _isFlashOn = !_isFlashOn);
+                    },
+                  ),
+                  // BOUTON CLAVIER (Manuel)
+                  _buildToolBtn(
+                    icon: Icons.keyboard_alt_outlined,
+                    label: "Clavier",
+                    isActive: false,
+                    onTap: _openManualEntry,
+                  ),
+                 // BOUTON GALERIE (Image)
+                  _buildToolBtn(
+                    icon: Icons.image_outlined,
+                    label: "Galerie",
+                    isActive: false,
+                    onTap: () async {
+                      final ImagePicker picker = ImagePicker();
+                      final XFile? image = await picker.pickImage(source: ImageSource.gallery);
+                      if (image != null) {
+                        // 🟢 CORRECTION : La nouvelle version renvoie directement le code capturé
+                        final capture = await _cameraController.analyzeImage(image.path);
+                        if (capture == null || capture.barcodes.isEmpty) {
+                          if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Aucun code détecté sur cette photo")));
+                        } else {
+                          final String? code = capture.barcodes.first.rawValue;
+                          if (code != null && mounted) {
+                            Navigator.pop(context, code); // Retourne le code trouvé et ferme le scanner
+                          }
+                        }
+                      }
+                    },
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildToolBtn({required IconData icon, required String label, required bool isActive, required VoidCallback onTap}) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: isActive ? Colors.orange : Colors.white.withOpacity(0.1),
+              shape: BoxShape.circle,
+            ),
+            child: Icon(icon, color: Colors.white, size: 24),
+          ),
+          const SizedBox(height: 5),
+          Text(label, style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.w600)),
+        ],
+      ),
     );
   }
 }

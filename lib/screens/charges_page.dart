@@ -269,23 +269,33 @@ class _ChargesPageState extends State<ChargesPage> {
 
                                 const SizedBox(width: 10), 
 
-                                // 3. MONTANT + DATE
-                                Column(
-                                  crossAxisAlignment: CrossAxisAlignment.end,
-                                  children: [
-                                    Text(
-                                      "-${item['amount']} DA", 
-                                      style: TextStyle(
-                                        fontWeight: FontWeight.w900, 
-                                        color: isPending ? Colors.grey : Colors.red, // Gris si pas confirmé
-                                        fontSize: 16
-                                      )
+                                // 3. MONTANT + DATE (protégé contre overflow)
+                                Flexible(
+                                  flex: 0,
+                                  child: ConstrainedBox(
+                                    constraints: const BoxConstraints(maxWidth: 130),
+                                    child: Column(
+                                      crossAxisAlignment: CrossAxisAlignment.end,
+                                      children: [
+                                        FittedBox(
+                                          fit: BoxFit.scaleDown,
+                                          child: Text(
+                                            "-${NumberFormat.compactCurrency(locale: 'fr', symbol: 'DA', decimalDigits: 0).format(double.tryParse(item['amount']?.toString() ?? '0') ?? 0)}", 
+                                            style: TextStyle(
+                                              fontWeight: FontWeight.w900, 
+                                              color: isPending ? Colors.grey : Colors.red,
+                                              fontSize: 16
+                                            ),
+                                            maxLines: 1,
+                                          ),
+                                        ),
+                                        Text(
+                                          DateFormat('dd/MM HH:mm').format(DateTime.parse(item['date'] ?? DateTime.now().toIso8601String())), 
+                                          style: const TextStyle(color: Colors.grey, fontSize: 10, fontWeight: FontWeight.bold)
+                                        ),
+                                      ],
                                     ),
-                                    Text(
-                                      DateFormat('dd/MM HH:mm').format(DateTime.parse(item['date'] ?? DateTime.now().toIso8601String())), 
-                                      style: const TextStyle(color: Colors.grey, fontSize: 10, fontWeight: FontWeight.bold)
-                                    ),
-                                  ],
+                                  ),
                                 )
                               ],
                             ),
