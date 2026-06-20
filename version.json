@@ -1,5 +1,5 @@
 {
-  "version": "2.0.5",
+  "version": "2.0.6",
   "url": "https://github.com/yourumk/infinity_mobile/releases/download/v2.0.5/app-release.apk",
-  "changelog": "🔒 Sécurité multi-appareils (1 compte = 1 téléphone)\n📦 Correction bug stock dupliqué/zéro\n💰 Solde client/fournisseur en temps réel\n☁️ Migration Cloud sécurisée (AES-256)\n🐛 Corrections de bugs et optimisations"
+  "changelog": "Sécurité renforcée : 1 compte = 1 téléphone\nCorrection du bug de stock dupliqué\nSolde client et fournisseur en temps réel\nMigration Cloud chiffrée (AES-256)\nNouveau système de permissions optimisé"
 }
