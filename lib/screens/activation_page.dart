@@ -166,7 +166,12 @@ Future<void> _activate() async {
     await prefs.remove('global_register');
     
     // 2. Purge complète du cache SQLite local (produits, tiers, paniers)
-    await ApiService().clearCache();
+    // ✅ FIX : try/catch pour éviter que le crash SQLite bloque le déverrouillage
+    try {
+      await ApiService().clearCache();
+    } catch (e) {
+      debugPrint("⚠️ Erreur clearCache (ignorée) : $e");
+    }
 
     setState(() {
       _keyController.clear();
@@ -228,20 +233,65 @@ Future<void> _activate() async {
 
                         // ═══ FROSTED GLASS FORM ═══
                         _buildFrostedCard(children: [
-                          // License field
-                          _buildGlassField(
-                            controller: _keyController,
-                            icon: Icons.storefront_rounded,
-                            label: "Code Magasin",
-                            hint: "INF-VOTRE-CODE",
-                            enabled: !_licenseIsLocked && !_isLoading,
-                            suffix: _licenseIsLocked
-                                ? IconButton(
-                                    icon: const Icon(Icons.edit_rounded, size: 18, color: Color(0xFF6366F1)),
-                                    onPressed: () => _unlockLicense(),
-                                    tooltip: "Modifier la licence",
-                                  )
-                                : null,
+                          // License field + Bouton modifier externe
+                          Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Padding(
+                                padding: const EdgeInsets.only(left: 4, bottom: 8),
+                                child: Text("Code Magasin", style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: Colors.white.withOpacity(0.5), letterSpacing: 0.8)),
+                              ),
+                              Row(
+                                children: [
+                                  Expanded(
+                                    child: Container(
+                                      decoration: BoxDecoration(
+                                        borderRadius: BorderRadius.circular(16),
+                                        color: Colors.white.withOpacity(0.06),
+                                        border: Border.all(color: Colors.white.withOpacity(0.08)),
+                                      ),
+                                      child: TextField(
+                                        controller: _keyController,
+                                        enabled: !_licenseIsLocked && !_isLoading,
+                                        style: const TextStyle(color: Colors.white, fontSize: 15, fontWeight: FontWeight.w500),
+                                        decoration: InputDecoration(
+                                          hintText: "INF-VOTRE-CODE",
+                                          hintStyle: TextStyle(color: Colors.white.withOpacity(0.2), fontSize: 14),
+                                          prefixIcon: Padding(
+                                            padding: const EdgeInsets.only(left: 14, right: 10),
+                                            child: Icon(Icons.storefront_rounded, color: const Color(0xFF6366F1).withOpacity(0.8), size: 20),
+                                          ),
+                                          prefixIconConstraints: const BoxConstraints(minWidth: 44),
+                                          contentPadding: const EdgeInsets.symmetric(vertical: 16, horizontal: 0),
+                                          border: InputBorder.none,
+                                          enabledBorder: InputBorder.none,
+                                          focusedBorder: InputBorder.none,
+                                          disabledBorder: InputBorder.none,
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                  // ✅ FIX : Bouton EXTERNE au TextField — toujours cliquable
+                                  if (_licenseIsLocked)
+                                    Padding(
+                                      padding: const EdgeInsets.only(left: 10),
+                                      child: GestureDetector(
+                                        onTap: () => _unlockLicense(),
+                                        child: Container(
+                                          width: 48,
+                                          height: 48,
+                                          decoration: BoxDecoration(
+                                            color: const Color(0xFF6366F1).withOpacity(0.15),
+                                            borderRadius: BorderRadius.circular(14),
+                                            border: Border.all(color: const Color(0xFF6366F1).withOpacity(0.3)),
+                                          ),
+                                          child: const Icon(Icons.edit_rounded, size: 20, color: Color(0xFF6366F1)),
+                                        ),
+                                      ),
+                                    ),
+                                ],
+                              ),
+                            ],
                           ),
 
                           const SizedBox(height: 18),

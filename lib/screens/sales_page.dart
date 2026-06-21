@@ -14,6 +14,8 @@ import '../widgets/glass_card.dart';
 import '../widgets/cart_item_card.dart';
 import '../widgets/searchable_select_modal.dart';
 import 'offline_queue_page.dart';
+import 'activation_page.dart'; // 🟢 Pour la redirection expulsion
+import 'app_locked_page.dart'; // 🟡 Pour la suspension temporaire
 import 'dart:convert';
 
 class SalesPage extends StatefulWidget {
@@ -44,18 +46,19 @@ class _SalesPageState extends State<SalesPage> {
   String _selectedCategory = 'Tout';
   String _selectedSubCategory = 'Tout';
   String _activeSmartFilter = 'none';
-  String _stockFilter = 'all'; // 🟢 TÂCHE 4 : Filtre stock (all / in_stock / low_stock / out_of_stock)
+  String _stockFilter = 'Tout';
 
   List<Map<String, dynamic>> _cart = [];
   int? _selectedClientId;
   String _selectedClientName = "Client Comptoir";
 
   bool _isLoading = true;
-  bool _isSending = false;
+  bool _isCheckoutOpen = false; // 🟢 FIX: Empêche d'ouvrir deux paniers superposés
   Timer? _debounce;
 
   bool _enableTva = false;
   bool _enableTimbre = false;
+  bool _allowNegativeStock = false; // 📦 Stock négatif autorisé ou non
 
   @override
   void initState() {
@@ -90,6 +93,7 @@ class _SalesPageState extends State<SalesPage> {
       setState(() {
         _enableTva = prefs.getBool('enable_tva') ?? false;
         _enableTimbre = prefs.getBool('enable_timbre') ?? false;
+        _allowNegativeStock = prefs.getBool('allow_negative_stock') ?? false;
       });
     }
   }
@@ -117,7 +121,18 @@ class _SalesPageState extends State<SalesPage> {
       if (mounted) {
         setState(() {
           _allProducts = productsData['products'] ?? [];
-         List<dynamic> cats = productsData['categories'] ?? [];
+      
+      // 🟢 TÂCHE 3 : Nettoyer le panier des produits fantômes
+      _cart.removeWhere((cartItem) {
+        final qty = double.tryParse(cartItem['qty']?.toString() ?? '0') ?? 0.0;
+        if (qty <= 0) return true;
+        final exists = _allProducts.any((p) => p['id'].toString() == cartItem['product_id'].toString());
+        return !exists;
+      });
+      _api.saveCart('sales', _cart);
+      
+      _filteredProducts = List.from(_allProducts);
+      List<dynamic> cats = productsData['categories'] ?? [];
 var uniqueCats = cats.map((e) => e.toString())
     .where((c) => c.toLowerCase() != 'tout')
     .toSet()
@@ -138,6 +153,16 @@ _categories = ['Tout', ...uniqueCats];
         });
       }
     } catch (e) {
+      // 🟢 EXPULSION EN DIRECT : Le compte a été touché par l'admin !
+      if (e.toString().contains('AUTH_INVALID')) {
+        _forceLogout();
+        return;
+      }
+      // 🟡 VERROUILLAGE TEMPORAIRE
+      if (e.toString().contains('AUTH_LOCKED')) {
+        _forceLock();
+        return;
+      }
       if (mounted) {
         setState(() => _isLoading = false);
         if (!silent) {
@@ -234,6 +259,19 @@ _currentSubCategories = ['Tout', ...filteredSubSet];
     }
   }
 
+  // 🟢 FIX: Calcule le stock effectif en tenant compte des variantes
+  double _getEffectiveStock(dynamic p) {
+    final variants = p['variants'];
+    if (variants != null && variants is List && variants.isNotEmpty) {
+      double total = 0;
+      for (var v in variants) {
+        total += double.tryParse(v['stock']?.toString() ?? '0') ?? 0;
+      }
+      return total;
+    }
+    return double.tryParse(p['stock']?.toString() ?? '0') ?? 0;
+  }
+
   void _applyFilters() {
     final query = _searchController.text.toLowerCase().trim();
 
@@ -277,28 +315,20 @@ _currentSubCategories = ['Tout', ...filteredSubSet];
         temp = temp.where((p) => (int.tryParse(p['is_favorite']?.toString() ?? '0') ?? 0) == 1).toList();
       } else if (_activeSmartFilter == 'low') {
         temp = temp.where((p) {
-          final stock = double.tryParse(p['stock']?.toString() ?? '0') ?? 0;
+          final stock = _getEffectiveStock(p);
           final min = double.tryParse(p['min_stock']?.toString() ?? '5') ?? 5;
           return stock <= min;
         }).toList();
       }
 
-      // 🟢 TÂCHE 4 : Filtre par niveau de stock
-      if (_stockFilter == 'in_stock') {
+      if (_stockFilter != 'Tout') {
         temp = temp.where((p) {
-          final stock = double.tryParse(p['stock']?.toString() ?? '0') ?? 0;
-          return stock > 0;
-        }).toList();
-      } else if (_stockFilter == 'low_stock') {
-        temp = temp.where((p) {
-          final stock = double.tryParse(p['stock']?.toString() ?? '0') ?? 0;
+          final stock = _getEffectiveStock(p);
           final min = double.tryParse(p['min_stock']?.toString() ?? '5') ?? 5;
-          return stock > 0 && stock <= min;
-        }).toList();
-      } else if (_stockFilter == 'out_of_stock') {
-        temp = temp.where((p) {
-          final stock = double.tryParse(p['stock']?.toString() ?? '0') ?? 0;
-          return stock <= 0;
+          if (_stockFilter == 'En Stock') return stock > 0;
+          if (_stockFilter == 'Stock Bas') return stock > 0 && stock <= min;
+          if (_stockFilter == 'Rupture') return stock <= 0;
+          return true;
         }).toList();
       }
 
@@ -331,9 +361,15 @@ _currentSubCategories = ['Tout', ...filteredSubSet];
 
   void _quickUpdateCart(dynamic product, double delta) {
     final int pId = int.tryParse(product['id'].toString()) ?? 0;
+    final double price = double.tryParse(product['price'].toString()) ?? 0.0; 
+    final double cost = double.tryParse(product['cost'].toString()) ?? 0.0; // 🟢 FIX CRITIQUE: Récupérer le coût
     
     setState(() {
-      final index = _cart.indexWhere((item) => item['product_id'] == pId && item['variant_id'] == null);
+      final index = _cart.indexWhere((item) => 
+          item['product_id'] == pId && 
+          item['variant_id'] == null &&
+          item['price'] == price
+      );
       
       if (index >= 0) {
         double newQty = _cart[index]['qty'] + delta;
@@ -343,11 +379,11 @@ _currentSubCategories = ['Tout', ...filteredSubSet];
           _cart[index]['qty'] = newQty;
         }
       } else if (delta > 0) {
-        final price = double.tryParse(product['price'].toString()) ?? 0;
       _cart.add({
           'product_id': pId,
           'name': product['name'],
           'price': price,
+          'cost': cost, // 🟢 FIX CRITIQUE: Injecter le coût pour que le bénéfice soit juste !
           'qty': delta,
           'variant_id': null,
           'unit': product['unit'] ?? 'u',
@@ -357,7 +393,7 @@ _currentSubCategories = ['Tout', ...filteredSubSet];
          HapticFeedback.mediumImpact();
       }
     });
-    _api.saveCart('sales', _cart); // 🚀 Persist panier
+    _api.saveCart('sales', _cart); 
   }
 
   void _onProductTap(dynamic product) {
@@ -375,49 +411,86 @@ void _showVariantSelector(dynamic product, List variants) {
       context: context,
       backgroundColor: Colors.transparent,
       isScrollControlled: true,
-      builder: (ctx) => Container(
-        padding: const EdgeInsets.all(20),
-        decoration: BoxDecoration(color: Theme.of(context).canvasColor, borderRadius: const BorderRadius.vertical(top: Radius.circular(25))),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text("Choisir une variante pour ${product['name']}", style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18), textAlign: TextAlign.center),
-            const SizedBox(height: 15),
-            Flexible(
-              child: SingleChildScrollView(
-                child: Column(
-                  children: variants.map((v) {
-                    String optLabel = v['sku'] ?? 'Variante';
-                    try {
-                      if (v['options'] != null) {
-                        Map<String, dynamic> opts = v['options'] is String ? jsonDecode(v['options']) : v['options'];
-                        if (opts.isNotEmpty) {
-                          optLabel = opts.entries.map((e) => "${e.key}: ${e.value}").join(' | ');
+      builder: (ctx) => SafeArea(
+        top: false,
+        child: Container(
+          padding: EdgeInsets.fromLTRB(20, 20, 20, MediaQuery.of(ctx).viewPadding.bottom + 20),
+          decoration: BoxDecoration(color: Theme.of(context).canvasColor, borderRadius: const BorderRadius.vertical(top: Radius.circular(25))),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // Poignée de glissement
+              Container(width: 40, height: 4, margin: const EdgeInsets.only(bottom: 15), decoration: BoxDecoration(color: Colors.grey[400], borderRadius: BorderRadius.circular(2))),
+              Text("Choisir une variante pour ${product['name']}", style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18), textAlign: TextAlign.center),
+              const SizedBox(height: 15),
+              ConstrainedBox(
+                constraints: BoxConstraints(maxHeight: MediaQuery.of(ctx).size.height * 0.45),
+                child: SingleChildScrollView(
+                  physics: const BouncingScrollPhysics(),
+                  child: Column(
+                    children: variants.map((v) {
+                      String optLabel = v['sku'] ?? 'Variante';
+                      try {
+                        if (v['options'] != null) {
+                          Map<String, dynamic> opts = v['options'] is String ? jsonDecode(v['options']) : v['options'];
+                          if (opts.isNotEmpty) {
+                            optLabel = opts.entries.map((e) => "${e.key}: ${e.value}").join(' | ');
+                          }
                         }
-                      }
-                    } catch(e) {}
+                      } catch(e) {}
 
-                    return ListTile(
-                      leading: const Icon(Icons.style, color: Colors.orange),
-                      title: Text(optLabel, style: const TextStyle(fontWeight: FontWeight.bold)),
-                      trailing: Text("${v['price']} DA", style: const TextStyle(fontWeight: FontWeight.bold, color: AppColors.primary, fontSize: 15)),
-                      subtitle: Text("Stock: ${v['stock']}"),
-                      onTap: () {
-                        Navigator.pop(context);
-                        Map<String, dynamic> variantProduct = Map.from(product);
-                        variantProduct['id'] = product['id']; 
-                        variantProduct['variant_id'] = v['id'];
-                        variantProduct['name'] = "${product['name']} ($optLabel)";
-                        variantProduct['price'] = v['price'];
-                        variantProduct['stock'] = v['stock'];
-                        _showProductConfigurator(variantProduct, isVariant: true);
-                      },
-                    );
-                  }).toList(),
+                      final vStock = double.tryParse(v['stock']?.toString() ?? '0') ?? 0;
+                      final isLowV = vStock <= 0;
+
+                      return Container(
+                        margin: const EdgeInsets.only(bottom: 8),
+                        decoration: BoxDecoration(
+                          color: Theme.of(context).brightness == Brightness.dark ? Colors.white.withOpacity(0.05) : Colors.grey[50],
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(color: isLowV ? Colors.red.withOpacity(0.3) : Colors.grey.withOpacity(0.15)),
+                        ),
+                        child: ListTile(
+                          contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                          leading: Container(
+                            width: 40, height: 40,
+                            decoration: BoxDecoration(color: Colors.orange.withOpacity(0.1), borderRadius: BorderRadius.circular(10)),
+                            child: const Icon(Icons.style, color: Colors.orange, size: 20),
+                          ),
+                          title: Text(optLabel, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
+                          trailing: Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            crossAxisAlignment: CrossAxisAlignment.end,
+                            children: [
+                              Text("${v['price']} DA", style: const TextStyle(fontWeight: FontWeight.bold, color: AppColors.primary, fontSize: 14)),
+                              const SizedBox(height: 2),
+                              Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                decoration: BoxDecoration(
+                                  color: isLowV ? Colors.red.withOpacity(0.15) : Colors.green.withOpacity(0.1),
+                                  borderRadius: BorderRadius.circular(4),
+                                ),
+                                child: Text("Qté: ${vStock.toInt()}", style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: isLowV ? Colors.red : Colors.green)),
+                              ),
+                            ],
+                          ),
+                          onTap: () {
+                            Navigator.pop(context);
+                            Map<String, dynamic> variantProduct = Map.from(product);
+                            variantProduct['id'] = product['id']; 
+                            variantProduct['variant_id'] = v['id'];
+                            variantProduct['name'] = "${product['name']} ($optLabel)";
+                            variantProduct['price'] = v['price'];
+                            variantProduct['stock'] = v['stock'];
+                            _showProductConfigurator(variantProduct, isVariant: true);
+                          },
+                        ),
+                      );
+                    }).toList(),
+                  ),
                 ),
-              ),
-            )
-          ],
+              )
+            ],
+          ),
         ),
       )
     );
@@ -431,6 +504,7 @@ void _showVariantSelector(dynamic product, List variants) {
       builder: (ctx) => AddToCartSheet(
         product: product,
         enableTva: _enableTva,
+        allowNegativeStock: _allowNegativeStock,
         onAdd: (qty, price, note) {
            _addToCart(product, qty, price, isVariant ? product['variant_id'] : null);
         },
@@ -440,9 +514,14 @@ void _showVariantSelector(dynamic product, List variants) {
 
   void _addToCart(dynamic product, double qty, double price, dynamic variantId) {
     final int pId = int.tryParse(product['id'].toString()) ?? 0;
+    final double cost = double.tryParse(product['cost'].toString()) ?? 0.0; // 🟢 FIX CRITIQUE: Récupérer le coût
 
     setState(() {
-      final index = _cart.indexWhere((item) => item['product_id'] == pId && item['variant_id'] == variantId && item['price'] == price);
+      final index = _cart.indexWhere((item) => 
+          item['product_id'] == pId && 
+          item['variant_id'] == variantId &&
+          item['price'] == price
+      );
       
       if (index >= 0) {
         _cart[index]['qty'] += qty;
@@ -451,6 +530,7 @@ void _showVariantSelector(dynamic product, List variants) {
           'product_id': pId,
           'name': product['name'],
           'price': price,
+          'cost': cost, // 🟢 FIX CRITIQUE: Injecter le coût
           'qty': qty,
           'variant_id': variantId,
           'unit': product['unit'] ?? 'u',
@@ -459,7 +539,7 @@ void _showVariantSelector(dynamic product, List variants) {
         });
       }
     });
-    _api.saveCart('sales', _cart); // 🚀 Persist panier
+    _api.saveCart('sales', _cart);
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(
       content: Text("${qty.toStringAsFixed(0)} x ${product['name']} ajouté!"), 
       duration: const Duration(milliseconds: 800),
@@ -470,6 +550,8 @@ void _showVariantSelector(dynamic product, List variants) {
 
   void _showCheckoutSheet() async {
     if (_cart.isEmpty) return;
+    if (_isCheckoutOpen) return; // 🟢 FIX: Vérouille contre l'ouverture multiple
+    _isCheckoutOpen = true;
 
     // 🔐 CHANTIER 4 : Vérifier que la session de caisse est ouverte AVANT de permettre le paiement
     try {
@@ -489,7 +571,10 @@ void _showVariantSelector(dynamic product, List variants) {
           final activeSessionId = myReg['active_session_id'];
 
           if (hasSession == 1 && activeSessionId == null) {
-            if (!mounted) return;
+            if (!mounted) {
+              _isCheckoutOpen = false;
+              return;
+            }
             ScaffoldMessenger.of(context).showSnackBar(
               SnackBar(
                 content: const Row(
@@ -505,6 +590,7 @@ void _showVariantSelector(dynamic product, List variants) {
                 shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
               ),
             );
+            _isCheckoutOpen = false;
             return; // ❌ BLOQUÉ : Session fermée
           }
         }
@@ -514,8 +600,11 @@ void _showVariantSelector(dynamic product, List variants) {
       debugPrint("⚠️ Vérification session caisse échouée (mode offline) : $e");
     }
 
-    if (!mounted) return;
-    showModalBottomSheet(
+    if (!mounted) {
+      _isCheckoutOpen = false;
+      return;
+    }
+    await showModalBottomSheet(
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
@@ -533,11 +622,23 @@ void _showVariantSelector(dynamic product, List variants) {
         onCreateClient: (name, phone) {}, 
       ),
     );
+
+    _isCheckoutOpen = false; // 🟢 FIX: Libère le verrou uniquement quand on quitte le panier
   }
 
- Future<void> _processSale(String? note, int? clientId, String clientName, double paidAmount, String paymentType, double discount, double tvaAmount, double timbreAmount, double htAmount, bool isReturn) async {
-    Navigator.pop(context); // ✅ 1er Pop : Ferme le panneau de paiement correctement
-    setState(() => _isSending = true);
+Future<void> _processSale(String? note, int? clientId, String clientName, double paidAmount, String paymentType, double discount, double tvaAmount, double timbreAmount, double htAmount, bool isReturn) async {
+    // 1. LA VRAIE RÉPARATION : Si le panier est vide (clic multiple), on s'arrête net.
+    if (_cart.isEmpty) return;
+
+    // 2. On fige les données à envoyer
+    final itemsToSend = List<Map<String, dynamic>>.from(_cart);
+    
+    // 3. On VIDE LE PANIER IMMÉDIATEMENT. Un 2ème clic trouvera un panier vide.
+    setState(() {
+      _cart.clear(); 
+    });
+    
+    Navigator.pop(context); // On ferme la modale
 
     double actualTva = _enableTva ? tvaAmount : 0.0;
     double actualTimbre = _enableTimbre ? timbreAmount : 0.0;
@@ -546,7 +647,7 @@ void _showVariantSelector(dynamic product, List variants) {
     try {
       await _api.sendComplexSaleOptimistic(
         netTotal, 
-        List.from(_cart), 
+        itemsToSend, // On envoie la copie figée
         note: note, 
         clientId: clientId, 
         clientName: clientName,
@@ -560,25 +661,20 @@ void _showVariantSelector(dynamic product, List variants) {
       );
 
       if (mounted) {
-        setState(() => _isSending = false);
-        await _api.clearCart('sales'); // 🚀 Vider le panier SQLite
+        await _api.clearCart('sales'); // Nettoie le cache SQLite
         setState(() {
-          _cart.clear();
           _selectedClientId = null;
           _selectedClientName = "Client Comptoir";
           _searchController.clear();
           _activeSmartFilter = 'none';
         });
-        if (!mounted) return;
-        
-        // ❌ Ligne "Navigator.pop(context);" supprimée pour éviter l'écran noir
-        
         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("✅ Vente enregistrée !"), backgroundColor: Colors.green));
       }
     } catch (e) {
-       if(mounted) setState(() => _isSending = false);
+       // En cas de crash inattendu, on restaure le panier pour ne rien perdre
+       if(mounted) setState(() => _cart = itemsToSend);
     }
-  }
+}
   double get _total {
     double t = 0;
     for(var i in _cart) {
@@ -588,87 +684,107 @@ void _showVariantSelector(dynamic product, List variants) {
     }
     return t;
   }
-
-  Widget _buildSmartFilterBtn(String id, String label, IconData icon, Color color, bool isDark) {
-    final bool isActive = _activeSmartFilter == id;
-    return Padding(
-      padding: const EdgeInsets.only(right: 10),
-      child: GestureDetector(
-        onTap: () {
-          setState(() {
-            _activeSmartFilter = isActive ? 'none' : id;
-            _applyFilters();
-          });
-        },
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 200),
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-          decoration: BoxDecoration(
-            color: isActive ? color : (isDark ? Colors.white.withOpacity(0.05) : Colors.white),
-            borderRadius: BorderRadius.circular(20),
-            border: Border.all(color: isActive ? color : (isDark ? Colors.white10 : Colors.grey[300]!), width: 1),
-            boxShadow: isActive ? [BoxShadow(color: color.withOpacity(0.4), blurRadius: 8, offset: const Offset(0, 4))] : [],
-          ),
-          child: Row(
-            children: [
-              Icon(icon, size: 14, color: isActive ? Colors.white : color),
-              const SizedBox(width: 8),
-              Text(label, style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: isActive ? Colors.white : (isDark ? Colors.white70 : Colors.black87))),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  // 🟢 TÂCHE 4 : Filtres de stock (Tout / En Stock / Stock Bas / Rupture)
-  Widget _buildStockFilterRow(bool isDark) {
-    final filters = [
-      {'id': 'all', 'label': 'Tout', 'icon': Icons.apps, 'color': Colors.grey},
-      {'id': 'in_stock', 'label': 'En Stock', 'icon': Icons.check_circle_outline, 'color': Colors.green},
-      {'id': 'low_stock', 'label': 'Stock Bas', 'icon': Icons.warning_amber_rounded, 'color': Colors.orange},
-      {'id': 'out_of_stock', 'label': 'Rupture', 'icon': Icons.cancel_outlined, 'color': Colors.red},
-    ];
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(15, 8, 15, 0),
-      child: SingleChildScrollView(
-        scrollDirection: Axis.horizontal,
-        physics: const BouncingScrollPhysics(),
-        child: Row(
-          children: filters.map((f) {
-            final isActive = _stockFilter == f['id'];
-            final color = f['color'] as Color;
-            return Padding(
-              padding: const EdgeInsets.only(right: 8),
-              child: ChoiceChip(
-                label: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(f['icon'] as IconData, size: 14, color: isActive ? Colors.white : color),
-                    const SizedBox(width: 6),
-                    Text(f['label'] as String, style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: isActive ? Colors.white : (isDark ? Colors.white70 : Colors.black87))),
-                  ],
-                ),
-                selected: isActive,
-                onSelected: (selected) {
-                  setState(() {
-                    _stockFilter = selected ? (f['id'] as String) : 'all';
-                    _applyFilters();
-                  });
-                },
-                selectedColor: color,
-                backgroundColor: isDark ? Colors.white.withOpacity(0.05) : Colors.white,
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(20),
-                  side: BorderSide(color: isActive ? color : (isDark ? Colors.white10 : Colors.grey[300]!)),
-                ),
-                elevation: 0,
-                pressElevation: 0,
-              ),
+  void _showFilterSheet() {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setSheetState) {
+          Widget buildChip(String label, bool isSelected, Function(bool) onSel) {
+            return FilterChip(
+              label: Text(label, style: const TextStyle(fontSize: 12)),
+              selected: isSelected,
+              onSelected: (val) { setSheetState(() => onSel(val)); setState(() { onSel(val); _applyFilters(); }); },
+              backgroundColor: isDark ? Colors.white.withOpacity(0.05) : Colors.grey[100],
+              selectedColor: AppColors.primary.withOpacity(0.2),
+              checkmarkColor: AppColors.primary,
+              labelStyle: TextStyle(color: isSelected ? AppColors.primary : (isDark ? Colors.white70 : Colors.black87), fontWeight: isSelected ? FontWeight.bold : FontWeight.normal),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10), side: BorderSide(color: isSelected ? AppColors.primary : Colors.transparent)),
             );
-          }).toList(),
-        ),
-      ),
+          }
+
+          return Container(
+            padding: const EdgeInsets.all(20),
+            decoration: BoxDecoration(color: isDark ? const Color(0xFF1E1E2C) : Colors.white, borderRadius: const BorderRadius.vertical(top: Radius.circular(25))),
+            child: Column(
+              mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+                  const Text("Filtres", style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                  TextButton(onPressed: () { setSheetState(() { _selectedCategory = 'Tout'; _selectedSubCategory = 'Tout'; _activeSmartFilter = 'none'; _stockFilter = 'Tout'; }); setState(() { _selectedCategory = 'Tout'; _selectedSubCategory = 'Tout'; _activeSmartFilter = 'none'; _stockFilter = 'Tout'; _applyFilters(); }); }, child: const Text("Réinitialiser", style: TextStyle(color: Colors.red)))
+                ]),
+                const SizedBox(height: 15),
+                const Text("Catégories", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.grey)),
+                const SizedBox(height: 10),
+                // 🟢 Une seule ligne horizontale élégante et compacte
+                SizedBox(
+                  height: 38,
+                  child: SingleChildScrollView(
+                    scrollDirection: Axis.horizontal,
+                    physics: const BouncingScrollPhysics(),
+                    child: Row(children: _categories.map((c) => buildChip(c, _selectedCategory == c, (v) { if (v) { _selectedCategory = c; _updateSubCategoryList(); } })).toList()),
+                  ),
+                ),
+                if (_currentSubCategories.isNotEmpty) ...[
+                  const SizedBox(height: 15),
+                  const Text("Sous-catégories", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.grey)),
+                  const SizedBox(height: 10),
+                  SizedBox(
+                    height: 38,
+                    child: SingleChildScrollView(
+                      scrollDirection: Axis.horizontal,
+                      physics: const BouncingScrollPhysics(),
+                      child: Row(children: _currentSubCategories.map((s) => buildChip(s, _selectedSubCategory == s, (v) { if (v) _selectedSubCategory = s; })).toList()),
+                    ),
+                  ),
+                ],
+                const SizedBox(height: 15),
+                const Text("État du Stock", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.grey)),
+                const SizedBox(height: 10),
+                SizedBox(
+                  height: 38,
+                  child: SingleChildScrollView(
+                    scrollDirection: Axis.horizontal,
+                    physics: const BouncingScrollPhysics(),
+                    child: Row(children: ['Tout', 'En Stock', 'Stock Bas', 'Rupture'].map((st) => buildChip(st, _stockFilter == st, (v) { if (v) _stockFilter = st; })).toList()),
+                  ),
+                ),
+                const SizedBox(height: 15),
+                const Text("Filtres rapides", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.grey)),
+                const SizedBox(height: 10),
+                SizedBox(
+                  height: 38,
+                  child: SingleChildScrollView(
+                    scrollDirection: Axis.horizontal,
+                    physics: const BouncingScrollPhysics(),
+                    child: Row(children: [
+                      buildChip("Récents", _activeSmartFilter == 'new', (v) => _activeSmartFilter = v ? 'new' : 'none'),
+                      buildChip("Top Ventes", _activeSmartFilter == 'top', (v) => _activeSmartFilter = v ? 'top' : 'none'),
+                      buildChip("Favoris", _activeSmartFilter == 'fav', (v) => _activeSmartFilter = v ? 'fav' : 'none'),
+                      buildChip("Critique", _activeSmartFilter == 'low', (v) => _activeSmartFilter = v ? 'low' : 'none'),
+                    ]),
+                  ),
+                ),
+                const SizedBox(height: 30),
+                // 🟢 SafeArea : pousse automatiquement le bouton au-dessus de la barre système Android
+                SafeArea(
+                  top: false,
+                  child: SizedBox(
+                    width: double.infinity, height: 50, 
+                    child: ElevatedButton(
+                      style: ElevatedButton.styleFrom(backgroundColor: AppColors.primary, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15))), 
+                      onPressed: () => Navigator.pop(ctx), 
+                      child: const Text("Appliquer", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold))
+                    )
+                  ),
+                )
+              ],
+            ),
+          );
+        }
+      )
     );
   }
 
@@ -679,8 +795,7 @@ void _showVariantSelector(dynamic product, List variants) {
 
     return Scaffold(
       backgroundColor: bgColor,
-      extendBody: true,
-      extendBodyBehindAppBar: true,
+      extendBody: true, // <-- Corrige la bande noire en bas
       body: Stack(
         children: [
           Column(
@@ -741,106 +856,55 @@ void _showVariantSelector(dynamic product, List variants) {
                       ],
                     ),
                     const SizedBox(height: 20),
-                    GlassCard(
-                      isDark: isDark,
-                      borderRadius: 18,
-                      padding: EdgeInsets.zero,
-                      child: TextField(
-                        controller: _searchController,
-                        onChanged: (v) => _applyFilters(),
-                        style: TextStyle(color: isDark ? Colors.white : Colors.black),
-                        decoration: InputDecoration(
-                          hintText: "Rechercher (Nom, Réf, Code)...",
-                          hintStyle: TextStyle(color: Colors.grey[500], fontSize: 14),
-                          prefixIcon: const Icon(Icons.search, color: Colors.grey),
-                          suffixIcon: IconButton(
-                            icon: const Icon(Icons.qr_code_scanner, color: AppColors.primary),
-                            onPressed: _scanBarcode,
-                          ),
-                          border: InputBorder.none,
-                          contentPadding: const EdgeInsets.symmetric(vertical: 15),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 15),
-                    SingleChildScrollView(
-                      scrollDirection: Axis.horizontal,
-                      child: Row(
-                        children: [
-                          _buildSmartFilterBtn('new', 'Nouveaux', FontAwesomeIcons.wandMagicSparkles, Colors.blue, isDark),
-                          _buildSmartFilterBtn('top', 'Top Ventes', FontAwesomeIcons.fire, Colors.orange, isDark),
-                          _buildSmartFilterBtn('low', 'Critique', FontAwesomeIcons.triangleExclamation, Colors.red, isDark),
-                          _buildSmartFilterBtn('fav', 'Favoris', FontAwesomeIcons.heart, Colors.pink, isDark),
-                        ],
-                      ),
-                    ),
-                    const SizedBox(height: 15),
-                    SingleChildScrollView(
-                      scrollDirection: Axis.horizontal,
-                      physics: const BouncingScrollPhysics(),
-                      child: Row(
-                        children: _categories.map((cat) {
-                          final isSelected = _selectedCategory == cat;
-                          return Padding(
-                            padding: const EdgeInsets.only(right: 8),
-                            child: FilterChip(
-                              label: Text(cat),
-                              selected: isSelected,
-                              onSelected: (bool selected) {
-                                if (selected) {
-                                  setState(() {
-                                    _selectedCategory = cat;
-                                    _updateSubCategoryList();
-                                    _applyFilters();
-                                  });
-                                }
-                              },
-                              backgroundColor: isDark ? Colors.white.withOpacity(0.05) : Colors.white,
-                              selectedColor: AppColors.primary,
-                              labelStyle: TextStyle(color: isSelected ? Colors.white : (isDark ? Colors.white70 : Colors.black87), fontWeight: isSelected ? FontWeight.bold : FontWeight.normal),
-                              checkmarkColor: Colors.white,
-                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20), side: BorderSide(color: isDark ? Colors.white10 : Colors.grey[300]!)),
-                              elevation: 0,
-                            ),
-                          );
-                        }).toList(),
-                      ),
-                    ),
-                    if (_currentSubCategories.isNotEmpty)
-                      Padding(
-                        padding: const EdgeInsets.only(top: 10),
-                        child: SingleChildScrollView(
-                          scrollDirection: Axis.horizontal,
-                          physics: const BouncingScrollPhysics(),
-                          child: Row(
-                            children: _currentSubCategories.map((sub) {
-                              final isSelected = _selectedSubCategory == sub;
-                              return Padding(
-                                padding: const EdgeInsets.only(right: 8),
-                                child: GestureDetector(
-                                  onTap: () {
-                                     setState(() { _selectedSubCategory = sub; _applyFilters(); });
-                                  },
-                                  child: Container(
-                                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                                    decoration: BoxDecoration(
-                                      color: isSelected ? AppColors.primary.withOpacity(0.2) : Colors.transparent,
-                                      border: Border.all(color: isSelected ? AppColors.primary : Colors.grey.withOpacity(0.3)),
-                                      borderRadius: BorderRadius.circular(15)
-                                    ),
-                                    child: Text(sub, style: TextStyle(fontSize: 11, color: isSelected ? AppColors.primary : Colors.grey, fontWeight: FontWeight.bold)),
-                                  ),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: GlassCard(
+                            isDark: isDark,
+                            borderRadius: 18,
+                            padding: EdgeInsets.zero,
+                            child: TextField(
+                              controller: _searchController,
+                              onChanged: (v) => _applyFilters(),
+                              style: TextStyle(color: isDark ? Colors.white : Colors.black),
+                              decoration: InputDecoration(
+                                hintText: "Rechercher (Nom, Réf, Code)...",
+                                hintStyle: TextStyle(color: Colors.grey[500], fontSize: 14),
+                                prefixIcon: const Icon(Icons.search, color: Colors.grey),
+                                suffixIcon: IconButton(
+                                  icon: const Icon(Icons.qr_code_scanner, color: AppColors.primary),
+                                  onPressed: _scanBarcode,
                                 ),
-                              );
-                            }).toList(),
-                          ),
-                        ),
-                      ),
-                  ],
+                                border: InputBorder.none,
+                                contentPadding: const EdgeInsets.symmetric(vertical: 15),
+                              ),
                             ),
                           ),
                         ),
-                      _buildStockFilterRow(isDark),
+                        const SizedBox(width: 10),
+                        // 🟢 BOUTON FILTRE UNIQUE
+                        GestureDetector(
+                          onTap: _showFilterSheet,
+                          child: Container(
+                            height: 52, width: 52,
+                            decoration: BoxDecoration(
+                              color: (_selectedCategory != 'Tout' || _activeSmartFilter != 'none' || _stockFilter != 'Tout') 
+                                  ? AppColors.primary 
+                                  : (isDark ? Colors.white10 : Colors.white),
+                              borderRadius: BorderRadius.circular(16),
+                              border: Border.all(color: isDark ? Colors.white10 : Colors.grey[300]!),
+                            ),
+                            child: Icon(
+                              Icons.tune, 
+                              color: (_selectedCategory != 'Tout' || _activeSmartFilter != 'none' || _stockFilter != 'Tout') 
+                                  ? Colors.white 
+                                  : (isDark ? Colors.white70 : Colors.grey[700])
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 15),
                     ],
                   ),
                 ),
@@ -850,17 +914,24 @@ void _showVariantSelector(dynamic product, List variants) {
                   : _filteredProducts.isEmpty
                     ? Center(child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [Icon(Icons.inventory_2_outlined, size: 60, color: Colors.grey.withOpacity(0.3)), const SizedBox(height: 10), const Text("Aucun produit", style: TextStyle(color: Colors.grey))]))
                     : ListView.builder(
-                        padding: const EdgeInsets.fromLTRB(15, 15, 15, 200), // 🟢 TÂCHE 2: Augmenté pour éviter chevauchement panier
+                        key: const ValueKey('sales_product_list'),
+                        padding: const EdgeInsets.fromLTRB(15, 15, 15, 200), // 🟢 CORRECTION : Padding augmenté à 200 pour libérer l'espace sous le panier !
                         physics: const BouncingScrollPhysics(),
                         itemCount: _filteredProducts.length,
-                        itemBuilder: (ctx, i) => _buildProductCard(_filteredProducts[i], isDark),
+                        itemBuilder: (ctx, i) {
+                          final p = _filteredProducts[i];
+                          return KeyedSubtree(
+                            key: ValueKey('sale_${p['id']}'),
+                            child: _buildProductCard(p, isDark),
+                          );
+                        },
                       ),
               ),
             ],
           ),
-          if (_cart.isNotEmpty)
+         if (_cart.isNotEmpty)
             Positioned(
-              bottom: 105, left: 20, right: 20,
+              bottom: 12, left: 16, right: 16, // 🟢 Ajusté parfaitement tout en bas de l'écran
               child: SafeArea(
                 child: GestureDetector(
                   onTap: _showCheckoutSheet,
@@ -880,7 +951,7 @@ void _showVariantSelector(dynamic product, List variants) {
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Text("${_cart.length} Articles", style: const TextStyle(color: Colors.white70, fontSize: 12)),
-                            Text(NumberFormat.currency(locale: 'fr_DZ', symbol: 'DA', decimalDigits: 0).format(_total), style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w900, fontSize: 22)),
+                            Text(NumberFormat.currency(locale: 'fr_DZ', symbol: 'DA', decimalDigits: 2).format(_total), style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w900, fontSize: 22)),
                           ],
                         ),
                         Container(
@@ -936,30 +1007,49 @@ Widget _buildProductCard(dynamic p, bool isDark) {
               Builder(
                   builder: (context) {
                     final cleanUrl = ApiService.getCleanImageUrl(p['base_image_path']);
-                    return Container(
-                      width: 70,
-                      decoration: BoxDecoration(
-                        color: isLow ? Colors.red.withOpacity(0.1) : Colors.orange.withOpacity(0.05), 
-                        borderRadius: BorderRadius.circular(15),
-                        image: cleanUrl != null
-                            ? DecorationImage(
-                                image: NetworkImage(cleanUrl),
-                                fit: BoxFit.cover
-                              )
-                            : null
+                    return SizedBox(
+                      width: 65, height: 70,
+                      child: Stack(
+                        children: [
+                          Container(
+                            width: 65, height: 55,
+                            decoration: BoxDecoration(
+                              color: isLow ? Colors.red.withOpacity(0.1) : Colors.orange.withOpacity(0.05), 
+                              borderRadius: BorderRadius.circular(15),
+                              image: cleanUrl != null
+                                  ? DecorationImage(
+                                      image: NetworkImage(cleanUrl),
+                                      fit: BoxFit.cover
+                                    )
+                                  : null
+                            ),
+                            child: cleanUrl == null
+                              ? Center(child: Icon(hasVariants ? FontAwesomeIcons.layerGroup : FontAwesomeIcons.dolly, color: isLow ? Colors.red : Colors.orange, size: 22))
+                              : null,
+                          ),
+                          // 🟢 STOCK EN GROS — toujours visible
+                          Positioned(
+                            bottom: 0, left: 0, right: 0,
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(vertical: 2),
+                              decoration: BoxDecoration(
+                                color: isLow ? Colors.red : (isDark ? const Color(0xFF2A2A3E) : Colors.white),
+                                borderRadius: BorderRadius.circular(8),
+                                border: Border.all(color: isLow ? Colors.red : (isDark ? Colors.white24 : Colors.grey.shade300), width: 0.5),
+                              ),
+                              child: Text(
+                                "${stock.toInt()}",
+                                textAlign: TextAlign.center,
+                                style: TextStyle(
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w900,
+                                  color: isLow ? Colors.white : (isDark ? Colors.white : Colors.black87),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ],
                       ),
-                      child: cleanUrl == null
-                        ? Column(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              Icon(hasVariants ? FontAwesomeIcons.layerGroup : FontAwesomeIcons.dolly, color: isLow ? Colors.red : Colors.orange, size: 24),
-                              if(stock > 0) ...[
-                                const SizedBox(height: 5),
-                                Text("${stock.toInt()}", style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: isLow ? Colors.red : Colors.grey))
-                              ]
-                            ],
-                          )
-                        : null,
                     );
                   }
                 ),
@@ -1006,6 +1096,7 @@ Widget _buildProductCard(dynamic p, bool isDark) {
                         Text(_enableTva ? "TTC" : "HT", style: TextStyle(fontSize: 9, color: Colors.grey[500])),
                       ],
                     ),
+                    const SizedBox(height: 6),
                     hasVariants 
                     ? Container(
                         width: 35, height: 35,
@@ -1050,6 +1141,73 @@ Widget _buildProductCard(dynamic p, bool isDark) {
       ),
     );
   }
+
+  Widget _buildStockFilterRow(bool isDark) {
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      child: Row(
+        children: ['Tout', 'En Stock', 'Stock Bas', 'Rupture'].map((filter) {
+          final isSelected = _stockFilter == filter;
+          return Padding(
+            padding: const EdgeInsets.only(right: 8),
+            child: ChoiceChip(
+              label: Text(filter),
+              selected: isSelected,
+              onSelected: (bool selected) {
+                if (selected) {
+                  setState(() {
+                    _stockFilter = filter;
+                    _applyFilters();
+                  });
+                }
+              },
+              backgroundColor: isDark ? Colors.white.withOpacity(0.05) : Colors.white,
+              selectedColor: AppColors.primary,
+              labelStyle: TextStyle(
+                color: isSelected ? Colors.white : (isDark ? Colors.white70 : Colors.black87), 
+                fontWeight: isSelected ? FontWeight.bold : FontWeight.normal
+              ),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(20), 
+                side: BorderSide(color: isDark ? Colors.white10 : Colors.grey[300]!)
+              ),
+              elevation: 0,
+            ),
+          );
+        }).toList(),
+      ),
+    );
+  }
+
+  // 🟢 FONCTION D'EXPULSION AUTOMATIQUE
+  void _forceLogout() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.clear();
+    if (mounted) {
+      Navigator.of(context).pushAndRemoveUntil(
+        MaterialPageRoute(builder: (_) => ActivationPage(
+          toggleTheme: () {},
+          onThemeModeChanged: (_) {},
+          onLanguageChanged: (_) {},
+        )), 
+        (route) => false
+      );
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('⚠️ Session expirée : Votre compte a été modifié ou désactivé par l\'administrateur. Veuillez vous reconnecter.'),
+        backgroundColor: Colors.redAccent,
+        duration: Duration(seconds: 5),
+      ));
+    }
+  }
+
+  void _forceLock() {
+    if (mounted) {
+      Navigator.of(context).pushAndRemoveUntil(
+        MaterialPageRoute(builder: (ctx) => const AppLockedPage()), 
+        (route) => false
+      );
+    }
+  }
 } // 🟢 L'ACCOLADE MANQUANTE ÉTAIT ICI ! ELLE RÉPARE LES 50 ERREURS !
 Widget _buildBadge(String text, Color color) {
     return Container(
@@ -1062,9 +1220,10 @@ Widget _buildBadge(String text, Color color) {
 class AddToCartSheet extends StatefulWidget {
   final Map<String, dynamic> product;
   final bool enableTva; 
+  final bool allowNegativeStock; // 📦 Contrôle du stock négatif
   final Function(double, double, String?) onAdd;
 
-  const AddToCartSheet({super.key, required this.product, required this.enableTva, required this.onAdd});
+  const AddToCartSheet({super.key, required this.product, required this.enableTva, this.allowNegativeStock = false, required this.onAdd});
 
   @override
   State<AddToCartSheet> createState() => _AddToCartSheetState();
@@ -1075,6 +1234,7 @@ class _AddToCartSheetState extends State<AddToCartSheet> {
   late double _selectedPriceHT; 
   late String _selectedPriceType; 
   final TextEditingController _qtyController = TextEditingController();
+  bool _isAdding = false; // 🟢 VERROU ANTI-CLIC FOU
 
   double get _vatPercent => widget.enableTva ? (double.tryParse(widget.product['vat_percent']?.toString() ?? '0') ?? 0.0) : 0.0;
   double get _multiplier => 1 + (_vatPercent / 100);
@@ -1195,11 +1355,27 @@ return Padding(
               ),
               const SizedBox(height: 20),
               
-              SizedBox(
+            SizedBox(
                 width: double.infinity,
                 height: 55,
                 child: ElevatedButton(
                   onPressed: () {
+                    if (_isAdding) return; // 🟢 Empêche le double-clic instantané
+                    
+                    // 📦 VÉRIFICATION STOCK NÉGATIF
+                    if (!widget.allowNegativeStock) {
+                      final stock = double.tryParse(widget.product['stock']?.toString() ?? '0') ?? 0;
+                      if (_qty > stock) {
+                        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                          content: Text("⛔ Stock insuffisant ! Disponible: ${stock.toStringAsFixed(0)} — Demandé: ${_qty.toStringAsFixed(0)}"),
+                          backgroundColor: Colors.red,
+                          duration: const Duration(seconds: 3),
+                        ));
+                        return;
+                      }
+                    }
+                    
+                    setState(() => _isAdding = true);
                     Navigator.pop(context);
                     widget.onAdd(_qty, _selectedPriceHT, null); 
                   },
@@ -1286,6 +1462,7 @@ class CheckoutSheet extends StatefulWidget {
 class _CheckoutSheetState extends State<CheckoutSheet> {
   late int? _selId;
   late String _selName;
+  double _selBalance = 0.0; // 🧠 NOUVEAU: Stocke la dette du client
   final String _note = "";
   final TextEditingController _paidController = TextEditingController();
   final TextEditingController _discountController = TextEditingController();
@@ -1296,6 +1473,7 @@ class _CheckoutSheetState extends State<CheckoutSheet> {
   bool _enableTva = false;
   bool _enableTimbre = false;
   bool _isReturn = false;
+  bool _isProcessingValidation = false; // 🟢 Anti double-clic sur VALIDER
 
 
   @override
@@ -1305,7 +1483,18 @@ class _CheckoutSheetState extends State<CheckoutSheet> {
     _selName = widget.selectedClientName ?? "Client Comptoir";
     _localCart = List.from(widget.cart);
     _loadTaxesSettings();
+    _calculateInitialBalance(); // 🟢 NOUVEAU
     _updateTotalAndField();
+  }
+
+  // 🧠 NOUVEAU : Récupère la dette initiale
+  void _calculateInitialBalance() {
+    if (_selId != null && widget.clients.isNotEmpty) {
+      final client = widget.clients.firstWhere((c) => c['id'].toString() == _selId.toString(), orElse: () => null);
+      if (client != null) {
+        _selBalance = double.tryParse(client['balance']?.toString() ?? '0') ?? 0.0;
+      }
+    }
   }
 
   @override
@@ -1360,10 +1549,21 @@ class _CheckoutSheetState extends State<CheckoutSheet> {
 
   double get _netTotal => (_grossTotal - _discount + _tvaAmount + _timbreAmount).clamp(0.0, double.infinity);
 
-  void _updateTotalAndField() {
-    if (_paidController.text.isEmpty || double.tryParse(_paidController.text) == _grossTotal) {
-       _paidController.text = _netTotal.toStringAsFixed(2);
+ void _updateTotalAndField() {
+    double defaultPaid = _netTotal;
+    
+    // 🧠 INTELLIGENCE ABSOLUE : Si c'est un retour et que le client a une dette, 
+    // la dette absorbe l'argent du retour en priorité !
+    if (_isReturn && _selId != null && _selBalance > 0) {
+        defaultPaid = _netTotal - _selBalance;
+        if (defaultPaid < 0) defaultPaid = 0; // La dette annule complètement le remboursement cash
     }
+
+    // On met à jour le champ seulement s'il est vide, ou s'il contenait l'ancien total exact
+    if (_paidController.text.isEmpty || double.tryParse(_paidController.text) == _grossTotal || double.tryParse(_paidController.text) == _netTotal || _isReturn) {
+       _paidController.text = defaultPaid.toStringAsFixed(2);
+    }
+    if (mounted) setState(() {});
   }
 
   void _onDiscountChanged(String val) {
@@ -1392,15 +1592,27 @@ class _CheckoutSheetState extends State<CheckoutSheet> {
     if (_localCart.isEmpty) Navigator.pop(context);
   }
 
-  void _validate() {
+  // 🛠️ MODULE 5 : Édition du prix unitaire dans le panier
+  void _updatePrice(int index, double newPrice) {
+    setState(() {
+      _localCart[index]['price'] = newPrice;
+      _paidController.text = _netTotal.toStringAsFixed(2);
+    });
+    widget.onUpdateCart(_localCart);
+  }
+
+void _validate() {
+    if (_isProcessingValidation) return; 
+    
     final textAmount = _paidController.text.replaceAll(',', '.').trim();
     final paidAmount = double.tryParse(textAmount) ?? 0;
-    final remaining = _netTotal - paidAmount;
-    
-    if (remaining > 1.0 && _selId == null) {
+    final remaining = _netTotal - paidAmount; 
+
+    // 🟢 SÉCURITÉ : Forcer la sélection du client en cas de RETOUR ou de CRÉDIT
+    if ((remaining > 1.0 || _isReturn) && _selId == null) {
        ScaffoldMessenger.of(context).showSnackBar(
          const SnackBar(
-           content: Text("⚠️ CLIENT OBLIGATOIRE pour le crédit/versement !"), 
+           content: Text("⚠️ CLIENT OBLIGATOIRE pour un retour ou un crédit !"), 
            backgroundColor: Colors.red,
            duration: Duration(seconds: 3),
          )
@@ -1408,8 +1620,7 @@ class _CheckoutSheetState extends State<CheckoutSheet> {
        return; 
     }
 
-   // 🟢 CORRECTION DÉFINITIVE : Tout ce qui n'est pas payé à 100% DOIT être envoyé comme 'credit'
-    String type = 'cash'; 
+    String type = 'cash';
     if (remaining > 0.1) {
        type = 'credit'; 
     } else {
@@ -1418,7 +1629,15 @@ class _CheckoutSheetState extends State<CheckoutSheet> {
 
     double finalDiscount = double.tryParse(_discountController.text) ?? 0.0;
 
+    // 🟢 Verrouillage avant l'envoi
+    setState(() => _isProcessingValidation = true);
+    
     widget.onConfirm(_note.isEmpty ? null : _note, _selId, _selName, paidAmount, type, finalDiscount, _tvaAmount, _timbreAmount, _grossTotal, _isReturn);
+    
+    // 🟢 Relâche le verrou après 2s en cas de problème
+    Future.delayed(const Duration(seconds: 2), () {
+      if (mounted) setState(() => _isProcessingValidation = false);
+    });
   }
 
   @override
@@ -1520,6 +1739,7 @@ class _CheckoutSheetState extends State<CheckoutSheet> {
                           isDark: isDark,
                           onUpdateQty: _updateQty,
                           onRemove: _removeItem,
+                          onUpdatePrice: _updatePrice, // 🛠️ MODULE 5 : Édition prix
                         );
                       },
                     ),
@@ -1535,165 +1755,127 @@ class _CheckoutSheetState extends State<CheckoutSheet> {
         child: SafeArea(
           bottom: true,
           child: Padding(
-            padding: EdgeInsets.only(left: 20, right: 20, top: 10, bottom: MediaQuery.of(context).viewInsets.bottom + 10),
+            padding: EdgeInsets.only(left: 16, right: 16, top: 12, bottom: MediaQuery.of(context).viewInsets.bottom + 12),
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                // 🟢 MODE RETOUR
-                SwitchListTile(
-                  title: Text("Mode Retour", style: TextStyle(fontWeight: FontWeight.bold, color: _isReturn ? Colors.red : (isDark ? Colors.white : Colors.black))),
-                  subtitle: Text(_isReturn ? "Cette opération est un retour client" : "Vente standard", style: TextStyle(color: Colors.grey[500], fontSize: 12)),
-                  value: _isReturn,
-                  activeColor: Colors.red,
-                  onChanged: (val) => setState(() => _isReturn = val),
-                  contentPadding: EdgeInsets.zero,
-                ),
-                // 🟢 SÉLECTION RAPIDE CLIENT
-                GestureDetector(
-                  onTap: () => _openClientSelector(isDark),
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-                    decoration: BoxDecoration(color: isDark ? Colors.white.withValues(alpha: 0.05) : Colors.grey[100], borderRadius: BorderRadius.circular(15)),
-                    child: Row(
-                      children: [
-                        const Icon(Icons.person, color: Colors.blue, size: 20),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
+                // 🟢 LIGNE 1 : Client + Mode Retour (Fusionnés)
+                Row(
+                  children: [
+                    Expanded(
+                      flex: 6,
+                      child: GestureDetector(
+                        onTap: () => _openClientSelector(isDark),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                          decoration: BoxDecoration(color: isDark ? Colors.white.withOpacity(0.05) : Colors.grey[100], borderRadius: BorderRadius.circular(12)),
+                          child: Row(
                             children: [
-                              Text("Client", style: TextStyle(fontSize: 11, color: Colors.grey[500])),
-                              const SizedBox(height: 2),
-                              Text(_selName, style: TextStyle(fontWeight: FontWeight.w700, fontSize: 15, color: _selId != null ? Colors.blue : (isDark ? Colors.white : Colors.black))),
+                              const Icon(Icons.person, color: Colors.blue, size: 18),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: Text(_selName, style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13, color: _selId != null ? Colors.blue : (isDark ? Colors.white : Colors.black)), maxLines: 1, overflow: TextOverflow.ellipsis),
+                              ),
+                              Icon(Icons.arrow_drop_down, color: Colors.grey[500]),
                             ],
                           ),
                         ),
-                        // 💰 VERSEMENT RAPIDE : visible uniquement quand un client est sélectionné
-                        if (_selId != null)
-                          GestureDetector(
-                            onTap: () => _showQuickPaymentDialog(isDark),
-                            child: Container(
-                              margin: const EdgeInsets.only(right: 8),
-                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                              decoration: BoxDecoration(
-                                gradient: const LinearGradient(colors: [Color(0xFF10B981), Color(0xFF059669)]),
-                                borderRadius: BorderRadius.circular(10),
-                                boxShadow: [BoxShadow(color: Colors.green.withOpacity(0.3), blurRadius: 6, offset: const Offset(0, 2))],
-                              ),
-                              child: const Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  Icon(Icons.payments_outlined, color: Colors.white, size: 14),
-                                  SizedBox(width: 4),
-                                  Text("Versement", style: TextStyle(color: Colors.white, fontWeight: FontWeight.w800, fontSize: 11)),
-                                ],
-                              ),
-                            ),
-                          ),
-                        Icon(Icons.arrow_drop_down, color: Colors.grey[500]),
-                      ],
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 10),
-                Row(
-                  children: [
-                     Expanded(
-                       flex: _enableTva ? 5 : 10,
-                       child: TextField(
-                         controller: _discountController,
-                         keyboardType: TextInputType.number,
-                         style: TextStyle(color: isDark ? Colors.white : Colors.black, fontWeight: FontWeight.bold),
-                         onChanged: _onDiscountChanged,
-                         decoration: InputDecoration(labelText: "Remise (DA)", filled: true, fillColor: Colors.red.withOpacity(0.1), border: OutlineInputBorder(borderRadius: BorderRadius.circular(15), borderSide: BorderSide.none), prefixIcon: const Icon(Icons.discount, size: 18, color: Colors.red)),
-                       ),
-                     ),
-                     if (_enableTva) const SizedBox(width: 10),
-                     if (_enableTva)
-                      Expanded(
-                       flex: 5,
-                       child: Container(
-                         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 12),
-                         decoration: BoxDecoration(color: Colors.blue.withOpacity(0.1), borderRadius: BorderRadius.circular(15)),
-                         child: Column(
-                           crossAxisAlignment: CrossAxisAlignment.start,
-                           children: [
-                             const Text("TVA (Auto)", style: TextStyle(fontSize: 10, color: Colors.blue, fontWeight: FontWeight.bold)),
-                             Text("${_tvaAmount.toStringAsFixed(2)} DA", style: TextStyle(color: isDark ? Colors.white : Colors.black, fontWeight: FontWeight.bold, fontSize: 16)),
-                           ],
-                         ),
-                       ),
-                     ),
-                  ],
-                ),
-                const SizedBox(height: 10),
-                Row(
-                  children: [
-                     if (_enableTimbre)
-                       Expanded(
-                         flex: 4,
-                         child: Container(
-                           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 12),
-                           decoration: BoxDecoration(color: Colors.purple.withOpacity(0.1), borderRadius: BorderRadius.circular(15)),
-                           child: Column(
-                             crossAxisAlignment: CrossAxisAlignment.start,
-                             children: [
-                               const Text("Timbre", style: TextStyle(fontSize: 10, color: Colors.purple, fontWeight: FontWeight.bold)),
-                               Text("${_timbreAmount.toStringAsFixed(2)} DA", style: TextStyle(color: isDark ? Colors.white : Colors.black, fontWeight: FontWeight.bold, fontSize: 16)),
-                             ],
-                           ),
-                         ),
-                       ),
-                     if (_enableTimbre) const SizedBox(width: 10),
-                     Expanded(
-                       flex: _enableTimbre ? 6 : 10,
-                       child: TextField(
-                         controller: _paidController,
-                         keyboardType: TextInputType.number,
-                         style: TextStyle(color: isDark ? Colors.white : Colors.black, fontWeight: FontWeight.bold),
-                         onChanged: (v) => setState(() {}),
-                         decoration: InputDecoration(labelText: "Montant Versé", filled: true, fillColor: isDark ? Colors.white.withOpacity(0.05) : Colors.grey[100], border: OutlineInputBorder(borderRadius: BorderRadius.circular(15), borderSide: BorderSide.none)),
-                       ),
-                     ),
-                  ],
-                ),
-                const SizedBox(height: 10),
-                Row(
-                  children: [
-                    Expanded(child: _buildQuickPayBtn("TOUT", Colors.green, () => setState(() => _paidController.text = _netTotal.toStringAsFixed(2)))),
-                    const SizedBox(width: 10),
-                    Expanded(child: _buildQuickPayBtn("CRÉDIT", Colors.red, () => setState(() => _paidController.text = "0"))),
-                  ],
-                ),
-                if (isCredit)
-                  Padding(
-                    padding: const EdgeInsets.only(top: 10),
-                    child: Container(
-                      padding: const EdgeInsets.all(10),
-                      decoration: BoxDecoration(color: Colors.red.withOpacity(0.1), borderRadius: BorderRadius.circular(10)),
-                      child: Row(
-                        children: [
-                          const Icon(Icons.warning_amber, color: Colors.red, size: 20),
-                          const SizedBox(width: 10),
-                          Expanded(child: Text("Reste à payer (Dette) : ${NumberFormat.currency(locale: 'fr_DZ', symbol: 'DA', decimalDigits: 0).format(remaining)}", style: const TextStyle(color: Colors.red, fontWeight: FontWeight.bold))),
-                        ],
                       ),
                     ),
-                  ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      flex: 4,
+                      child: GestureDetector(
+                        onTap: () => setState(() => _isReturn = !_isReturn),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+                          decoration: BoxDecoration(color: _isReturn ? Colors.red.withOpacity(0.1) : (isDark ? Colors.white10 : Colors.grey[100]), borderRadius: BorderRadius.circular(12), border: Border.all(color: _isReturn ? Colors.red : Colors.transparent)),
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Icon(Icons.assignment_return, size: 16, color: _isReturn ? Colors.red : Colors.grey),
+                              const SizedBox(width: 6),
+                              Text("Retour", style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: _isReturn ? Colors.red : Colors.grey)),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
                 const SizedBox(height: 10),
-                SizedBox(
-                  width: double.infinity, height: 55,
-                  child: ElevatedButton(
-                    onPressed: _validate,
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: isCredit ? Colors.orange : Colors.green, 
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
+
+                // 🟢 LIGNE 2 : Remise + Montant Versé (Même ligne !)
+                Row(
+                  children: [
+                    Expanded(
+                      flex: 4,
+                      child: TextField(
+                        controller: _discountController,
+                        keyboardType: TextInputType.number,
+                        style: TextStyle(color: isDark ? Colors.white : Colors.black, fontWeight: FontWeight.bold),
+                        onChanged: _onDiscountChanged,
+                        decoration: InputDecoration(
+                          labelText: "Remise (DA)", labelStyle: const TextStyle(fontSize: 12),
+                          filled: true, fillColor: Colors.red.withOpacity(0.1),
+                          border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide.none),
+                          contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+                        ),
+                      ),
                     ),
-                    child: Text(
-                      isCredit ? "VALIDER CRÉDIT" : "ENCAISSER MAINTENANT", 
-                      style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.white),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      flex: 6,
+                      child: TextField(
+                        controller: _paidController,
+                        keyboardType: TextInputType.number,
+                        style: TextStyle(color: isDark ? Colors.white : Colors.black, fontWeight: FontWeight.w900, fontSize: 18),
+                        onChanged: (v) => setState(() {}),
+                        decoration: InputDecoration(
+                          labelText: "Montant Versé (DA)", labelStyle: const TextStyle(fontSize: 12),
+                          filled: true, fillColor: isDark ? Colors.white.withOpacity(0.05) : Colors.green.withOpacity(0.1),
+                          border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide.none),
+                          contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+                        ),
+                      ),
                     ),
-                  ),
+                  ],
+                ),
+
+                if (isCredit) ...[
+                  const SizedBox(height: 6),
+                  Text("⚠️ Reste à payer (Dette) : ${NumberFormat.currency(locale: 'fr_DZ', symbol: 'DA', decimalDigits: 2).format(remaining)}", style: const TextStyle(color: Colors.red, fontWeight: FontWeight.bold, fontSize: 12)),
+                ],
+                const SizedBox(height: 10),
+
+                // 🟢 LIGNE 3 : Boutons intelligents (CASH / AVOIR)
+                Row(
+                  children: [
+                    Expanded(flex: 2, child: _buildQuickPayBtn(_isReturn ? "CASH" : "TOUT", Colors.green, () => setState(() => _paidController.text = _netTotal.toStringAsFixed(2)))),
+                    const SizedBox(width: 8),
+                    Expanded(flex: 2, child: _buildQuickPayBtn(_isReturn ? "AVOIR" : "0 (CRÉD)", Colors.red, () => setState(() => _paidController.text = "0"))),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      flex: 4,
+                      child: SizedBox(
+                        height: 45,
+                       child: ElevatedButton(
+                          onPressed: _validate, 
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: _isReturn ? (isCredit ? Colors.orange : Colors.red) : (isCredit ? Colors.orange : Colors.green), 
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                            padding: EdgeInsets.zero
+                          ),
+                          child: Text(
+                            _isReturn 
+                                ? (isCredit ? "GARDER EN AVOIR" : "REMBOURSER CASH") 
+                                : (isCredit ? "CRÉDIT" : "ENCAISSER"), 
+                            style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w900, color: Colors.white),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
               ],
             ),
@@ -1703,8 +1885,7 @@ class _CheckoutSheetState extends State<CheckoutSheet> {
     );
   }
 
-  // 🟢 FIX #3 + #4: Ouvre le SearchableSelectModal pour sélectionner un client
-  void _openClientSelector(bool isDark) {
+void _openClientSelector(bool isDark) {
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -1718,14 +1899,15 @@ class _CheckoutSheetState extends State<CheckoutSheet> {
         onSelected: (selectedItem) {
           setState(() {
             if (selectedItem == null) {
-              // 🟢 FIX #4: Reset client => Client Comptoir
               _selId = null;
               _selName = "Client Comptoir";
+              _selBalance = 0.0;
             } else {
-              // 🟢 FIX #4: Sync ID + Nom pour createSale
               _selId = int.tryParse(selectedItem['id'].toString());
               _selName = selectedItem['name']?.toString() ?? 'Inconnu';
+              _selBalance = double.tryParse(selectedItem['balance']?.toString() ?? '0') ?? 0.0;
             }
+            _updateTotalAndField(); // 🟢 ACTUALISE LE MONTANT DU RETOUR DYNAMIQUEMENT
           });
         },
       ),
@@ -1736,110 +1918,9 @@ class _CheckoutSheetState extends State<CheckoutSheet> {
     return GestureDetector(
       onTap: onTap,
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 15),
-        decoration: BoxDecoration(color: color.withOpacity(0.15), borderRadius: BorderRadius.circular(15)),
-        child: Center(child: Text(label, style: TextStyle(color: color, fontWeight: FontWeight.bold, fontSize: 11))),
-      ),
-    );
-  }
-
-  // 💰 VERSEMENT RAPIDE CLIENT depuis la page de vente
-  void _showQuickPaymentDialog(bool isDark) {
-    final amountCtrl = TextEditingController();
-    final noteCtrl = TextEditingController();
-    final api = ApiService();
-
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-        backgroundColor: isDark ? const Color(0xFF1E1E2C) : Colors.white,
-        title: Row(
-          children: [
-            Container(
-              padding: const EdgeInsets.all(8),
-              decoration: BoxDecoration(color: const Color(0xFF10B981).withOpacity(0.15), borderRadius: BorderRadius.circular(10)),
-              child: const Icon(Icons.payments_outlined, color: Color(0xFF10B981), size: 20),
-            ),
-            const SizedBox(width: 10),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text("Versement Rapide", style: TextStyle(fontWeight: FontWeight.w900, fontSize: 16, color: isDark ? Colors.white : Colors.black)),
-                  Text(_selName, style: const TextStyle(fontSize: 12, color: Colors.grey, fontWeight: FontWeight.w600)),
-                ],
-              ),
-            ),
-          ],
-        ),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            TextField(
-              controller: amountCtrl,
-              keyboardType: TextInputType.number,
-              autofocus: true,
-              style: TextStyle(fontWeight: FontWeight.w900, fontSize: 22, color: isDark ? Colors.white : Colors.black),
-              decoration: InputDecoration(
-                labelText: "Montant (DA)",
-                prefixIcon: const Icon(Icons.attach_money, color: Color(0xFF10B981)),
-                filled: true,
-                fillColor: isDark ? Colors.white.withOpacity(0.05) : Colors.grey[100],
-                border: OutlineInputBorder(borderRadius: BorderRadius.circular(14), borderSide: BorderSide.none),
-              ),
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: noteCtrl,
-              style: TextStyle(color: isDark ? Colors.white : Colors.black),
-              decoration: InputDecoration(
-                labelText: "Note (optionnel)",
-                prefixIcon: const Icon(Icons.note_alt_outlined, color: Colors.grey),
-                filled: true,
-                fillColor: isDark ? Colors.white.withOpacity(0.05) : Colors.grey[100],
-                border: OutlineInputBorder(borderRadius: BorderRadius.circular(14), borderSide: BorderSide.none),
-              ),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: Text("Annuler", style: TextStyle(color: isDark ? Colors.white54 : Colors.grey)),
-          ),
-          ElevatedButton.icon(
-            onPressed: () async {
-              final amount = double.tryParse(amountCtrl.text) ?? 0;
-              if (amount <= 0) return;
-
-              await api.sendPartnerPaymentOptimistic(
-                partnerId: _selId,
-                amount: amount,
-                type: 'client',
-                note: noteCtrl.text.isEmpty ? 'Versement rapide' : noteCtrl.text,
-              );
-
-              if (context.mounted) {
-                Navigator.pop(ctx);
-                ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                  content: Text("✅ Versement de ${amount.toStringAsFixed(0)} DA enregistré pour $_selName"),
-                  backgroundColor: const Color(0xFF10B981),
-                  behavior: SnackBarBehavior.floating,
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                ));
-              }
-            },
-            icon: const Icon(Icons.check_circle, size: 18),
-            label: const Text("Confirmer", style: TextStyle(fontWeight: FontWeight.w800)),
-            style: ElevatedButton.styleFrom(
-              backgroundColor: const Color(0xFF10B981),
-              foregroundColor: Colors.white,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-            ),
-          ),
-        ],
+        height: 45,
+        decoration: BoxDecoration(color: color.withOpacity(0.15), borderRadius: BorderRadius.circular(12)),
+        child: Center(child: Text(label, style: TextStyle(color: color, fontWeight: FontWeight.w900, fontSize: 11))),
       ),
     );
   }

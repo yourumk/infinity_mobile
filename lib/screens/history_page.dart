@@ -6,9 +6,7 @@ import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'package:intl/intl.dart';
 import '../core/constants.dart';
 import '../services/api_service.dart';
-import '../services/print_service.dart';
 import '../widgets/glass_card.dart';
-import '../widgets/print_config_modal.dart';
 
 class HistoryPage extends StatefulWidget {
   final VoidCallback? onBack;
@@ -93,108 +91,6 @@ class _HistoryPageState extends State<HistoryPage> {
     );
   }
 
-  // 🖨️ IMPRESSION DIRECTE ESC/POS (Bluetooth) pour tickets
-  // ou PDF via PC pour A4/A5
-  Future<void> _quickPrint(BuildContext context, String format, String docType, dynamic id, [Map<String, dynamic>? saleData]) async {
-    // Option 1 : Impression rapide Bluetooth (Ticket ESC/POS)
-    if (saleData != null) {
-      // Récupérer les items pour construire le ticket
-      final items = await (docType == 'sale' ? _api.getSaleItems(id) : _api.getPurchaseItems(id));
-      if (!context.mounted) return;
-
-      // Loader
-      showDialog(
-        context: context,
-        barrierDismissible: false,
-        builder: (ctx) => Dialog(
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
-          child: Padding(
-            padding: const EdgeInsets.all(20),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: const [
-                CircularProgressIndicator(),
-                SizedBox(width: 20),
-                Text("Impression Bluetooth...", style: TextStyle(fontWeight: FontWeight.bold)),
-              ],
-            ),
-          ),
-        ),
-      );
-
-      final printService = PrintService();
-      final success = await printService.printSaleTicket(
-        invoiceNumber: (saleData['invoice_number'] ?? saleData['number'] ?? id).toString(),
-        items: items.map<Map<String, dynamic>>((e) => Map<String, dynamic>.from(e)).toList(),
-        totalTTC: double.tryParse(saleData['total_amount']?.toString() ?? '0') ?? 0,
-        totalHT: double.tryParse(saleData['total_ht']?.toString() ?? '0') ?? 0,
-        totalTVA: double.tryParse(saleData['total_vat']?.toString() ?? '0') ?? 0,
-        totalTimbre: double.tryParse(saleData['timbre']?.toString() ?? '0') ?? 0,
-        discount: double.tryParse(saleData['discount_value']?.toString() ?? '0') ?? 0,
-        amountPaid: double.tryParse(saleData['amount_paid']?.toString() ?? saleData['paid_amount']?.toString() ?? '0') ?? 0,
-        clientName: saleData['client_name'] ?? saleData['supplier_name'],
-        paymentType: saleData['payment_type'] ?? 'cash',
-        note: saleData['note'],
-      );
-
-      if (context.mounted) Navigator.pop(context); // Ferme le loader
-
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(success ? "✅ Ticket imprimé !" : "❌ Échec : Vérifiez l'imprimante Bluetooth."),
-            backgroundColor: success ? Colors.green : Colors.red,
-          ),
-        );
-      }
-      return;
-    }
-
-    // Option 2 : Impression PDF via PC (fallback A4/A5)
-    final config = await showModalBottomSheet<Map<String, dynamic>>(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-      builder: (ctx) => PrintConfigModal(initialFormat: format),
-    );
-
-    if (config != null && context.mounted) {
-      showDialog(
-        context: context,
-        barrierDismissible: false,
-        builder: (ctx) => Dialog(
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
-          child: Padding(
-            padding: const EdgeInsets.all(20),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: const [
-                CircularProgressIndicator(),
-                SizedBox(width: 20),
-                Text("Demande au PC...", style: TextStyle(fontWeight: FontWeight.bold)),
-              ],
-            ),
-          ),
-        ),
-      );
-
-      final success = await _api.printViaPC(
-        config['format'], 
-        docType, 
-        id,
-        options: config
-      );
-
-      if (context.mounted) Navigator.pop(context);
-
-      if (!success && context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text("Échec : Le PC de la boutique est-il allumé et connecté ?")),
-        );
-      }
-    }
-  }
-
 
 
   @override
@@ -208,7 +104,7 @@ class _HistoryPageState extends State<HistoryPage> {
         children: [
           // --- HEADER (SANS TABS) ---
           Container(
-            padding: const EdgeInsets.fromLTRB(20, 50, 20, 20),
+            padding: EdgeInsets.fromLTRB(20, MediaQuery.of(context).padding.top + 10, 20, 20),
             decoration: BoxDecoration(
               color: isDark ? const Color(0xFF1C1C23) : Colors.white,
               borderRadius: const BorderRadius.vertical(bottom: Radius.circular(30)),
@@ -381,7 +277,7 @@ Widget _buildFilterChip(String label, int value, bool isDark) {
       onRefresh: () => _loadHistory(isSilent: false),
       color: AppColors.primary,
       child: ListView.builder(
-        padding: const EdgeInsets.all(20),
+      padding: EdgeInsets.fromLTRB(20, 20, 20, MediaQuery.of(context).padding.bottom + 100),
         itemCount: filtered.length,
         itemBuilder: (ctx, i) {
           final item = filtered[i];
@@ -432,23 +328,12 @@ Widget _buildFilterChip(String label, int value, bool isDark) {
                         ],
                       ),
                     ),
-                    Column(
-                      crossAxisAlignment: CrossAxisAlignment.end,
-                      children: [
-                        FittedBox(
-                          fit: BoxFit.scaleDown,
-                          child: Text(
-                            NumberFormat.compactCurrency(locale: 'fr', symbol: 'DA', decimalDigits: 0).format(amount), 
-                            style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: isSale ? AppColors.primary : Colors.orange),
-                          ),
-                        ),
-                        const SizedBox(height: 5),
-                        IconButton(
-                          icon: const Icon(FontAwesomeIcons.print, size: 18, color: Colors.teal),
-                          tooltip: "Imprimer ticket",
-                          onPressed: () => _quickPrint(context, 'Ticket', isSale ? 'sale' : 'purchase', item['id'], item),
-                        )
-                      ],
+                    FittedBox(
+                      fit: BoxFit.scaleDown,
+                      child: Text(
+                        NumberFormat.compactCurrency(locale: 'fr', symbol: 'DA', decimalDigits: 2).format(amount), 
+                        style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: isSale ? AppColors.primary : Colors.orange),
+                      ),
                     ),
                   ],
                 ),
@@ -530,6 +415,7 @@ class _HistoryDetailSheetState extends State<HistoryDetailSheet> {
         originalTva: double.tryParse(data['total_vat']?.toString() ?? '0') ?? 0,
         originalTimbre: double.tryParse(data['timbre']?.toString() ?? '0') ?? 0,
         originalDiscount: double.tryParse(data['discount_value']?.toString() ?? '0') ?? 0,
+        originalPaid: double.tryParse(data['amount_paid']?.toString() ?? '0') ?? 0,
       ),
     );
 
@@ -612,6 +498,7 @@ class _HistoryDetailSheetState extends State<HistoryDetailSheet> {
         originalTva: double.tryParse(data['total_vat']?.toString() ?? '0') ?? 0,
         originalTimbre: double.tryParse(data['timbre']?.toString() ?? '0') ?? 0,
         originalDiscount: double.tryParse(data['discount_value']?.toString() ?? data['discount']?.toString() ?? '0') ?? 0,
+        originalPaid: double.tryParse(data['amount_paid']?.toString() ?? '0') ?? 0,
       ),
     );
 
@@ -658,9 +545,23 @@ class _HistoryDetailSheetState extends State<HistoryDetailSheet> {
     final name = isSale ? (data['client_name'] ?? 'Client') : (data['supplier_name'] ?? 'Fournisseur');
     final color = isSale ? AppColors.primary : Colors.orange;
 
+    final fmt = NumberFormat.currency(locale: 'fr_DZ', symbol: '', decimalDigits: 2);
+    final totalAmount = double.tryParse(data['total_amount']?.toString() ?? '0') ?? 0;
+    final totalHT = double.tryParse(data['total_ht']?.toString() ?? '0') ?? 0;
+    final totalVat = double.tryParse(data['total_vat']?.toString() ?? '0') ?? 0;
+    final timbre = double.tryParse(data['timbre']?.toString() ?? '0') ?? 0;
+    final discountVal = double.tryParse(data['discount_value']?.toString() ?? data['global_discount']?.toString() ?? '0') ?? 0;
+    final amountPaid = double.tryParse(data['amount_paid']?.toString() ?? '0') ?? 0;
+    final remaining = totalAmount - amountPaid;
+    final paymentType = data['payment_type']?.toString();
+    final isReturn = data['is_return'] == 1 || data['is_return'] == true;
+    final userName = data['user_name']?.toString() ?? data['source']?.toString();
+    final registerName = data['register_name']?.toString();
+    final warehouseName = data['warehouse_name']?.toString();
+
     return Container(
       height: MediaQuery.of(context).size.height * 0.85, 
-      padding: const EdgeInsets.all(25),
+      padding: EdgeInsets.fromLTRB(25, 25, 25, MediaQuery.of(context).padding.bottom + 20),
       decoration: BoxDecoration(
         color: isDark ? const Color(0xFF1E1E2C) : Colors.white,
         borderRadius: const BorderRadius.vertical(top: Radius.circular(30)),
@@ -670,16 +571,29 @@ class _HistoryDetailSheetState extends State<HistoryDetailSheet> {
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(title, style: TextStyle(fontSize: 20, fontWeight: FontWeight.w900, color: isDark ? Colors.white : Colors.black)),
-                  Text(name, style: const TextStyle(color: Colors.grey, fontSize: 13)),
-                ],
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Flexible(child: Text(title, style: TextStyle(fontSize: 20, fontWeight: FontWeight.w900, color: isDark ? Colors.white : Colors.black), overflow: TextOverflow.ellipsis)),
+                        if (isReturn) ...[
+                          const SizedBox(width: 8),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                            decoration: BoxDecoration(color: Colors.red.withOpacity(0.15), borderRadius: BorderRadius.circular(6), border: Border.all(color: Colors.red.withOpacity(0.4))),
+                            child: const Text("RETOUR", style: TextStyle(fontSize: 10, fontWeight: FontWeight.w900, color: Colors.red)),
+                          ),
+                        ],
+                      ],
+                    ),
+                    Text(name, style: const TextStyle(color: Colors.grey, fontSize: 13)),
+                  ],
+                ),
               ),
               Row(
                 children: [
-                  // 🟢 BOUTON MODIFIER (pour ventes ET achats)
                   IconButton(
                     icon: const Icon(Icons.edit, color: Colors.orange, size: 22),
                     tooltip: isSale ? "Modifier ce ticket" : "Modifier cet achat",
@@ -744,204 +658,74 @@ class _HistoryDetailSheetState extends State<HistoryDetailSheet> {
             ),
           ),
           
-         const Divider(),
-          const SizedBox(height: 10),
-
-          // --- AFFICHAGE TVA ET TIMBRE ---
-          if ((data['tva'] != null && double.tryParse(data['tva'].toString()) != 0) || 
-              (data['timbre'] != null && double.tryParse(data['timbre'].toString()) != 0)) ...[
-            if (data['tva'] != null && double.tryParse(data['tva'].toString()) != 0)
-              Padding(
-                padding: const EdgeInsets.only(bottom: 4),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    const Text("TVA", style: TextStyle(color: Colors.grey)),
-                    Text("${data['tva']} %", style: const TextStyle(fontWeight: FontWeight.bold)),
-                  ],
-                ),
+          // ── BLOC RÉCAPITULATIF (style ticket de caisse) ──
+          Divider(color: Colors.grey.withOpacity(0.2)),
+          
+          // Vendeur / Caisse / Dépôt
+          if (userName != null || registerName != null || warehouseName != null) ...[
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 6),
+              child: Wrap(
+                spacing: 16, runSpacing: 4,
+                children: [
+                  if (userName != null) _infoChip(Icons.person_outline, userName, isDark),
+                  if (registerName != null) _infoChip(Icons.point_of_sale, registerName, isDark),
+                  if (warehouseName != null) _infoChip(Icons.warehouse_outlined, warehouseName, isDark),
+                ],
               ),
-            if (data['timbre'] != null && double.tryParse(data['timbre'].toString()) != 0)
-              Padding(
-                padding: const EdgeInsets.only(bottom: 10),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    const Text("Timbre fiscal", style: TextStyle(color: Colors.grey)),
-                    Text("${data['timbre']} DA", style: const TextStyle(fontWeight: FontWeight.bold)),
-                  ],
-                ),
-              ),
-            const Divider(),
+            ),
+            Divider(color: Colors.grey.withOpacity(0.1)),
           ],
 
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              const Text("TOTAL", style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-              Text("${data['total_amount']} DA", style: TextStyle(fontSize: 24, fontWeight: FontWeight.w900, color: color)),
-            ],
+          // Lignes financières conditionnelles
+          if (totalHT > 0) _summaryRow("Total HT", "${fmt.format(totalHT)} DA", isDark),
+          if (totalVat > 0) _summaryRow("TVA", "${fmt.format(totalVat)} DA", isDark),
+          if (timbre > 0) _summaryRow("Timbre fiscal", "${fmt.format(timbre)} DA", isDark),
+          if (discountVal > 0) _summaryRow("Remise", "-${fmt.format(discountVal)} DA", isDark, valueColor: Colors.red),
+          
+          Divider(color: Colors.grey.withOpacity(0.2)),
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 6),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                const Text("TOTAL TTC", style: TextStyle(fontSize: 17, fontWeight: FontWeight.w900)),
+                Text("${fmt.format(totalAmount)} DA", style: TextStyle(fontSize: 22, fontWeight: FontWeight.w900, color: color, fontFeatures: const [FontFeature.tabularFigures()])),
+              ],
+            ),
           ),
+          Divider(color: Colors.grey.withOpacity(0.2)),
 
-          const SizedBox(height: 20),
-
-          // 3. MISE À JOUR DES BOUTONS D'IMPRESSION
-          if (isSale) ...[
-            const Align(alignment: Alignment.centerLeft, child: Text("📄 Imprimer Facture :", style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.grey))),
-            const SizedBox(height: 8),
-            Row(
-              children: [
-                Expanded(child: _buildPrintBtn(context, "Ticket", FontAwesomeIcons.receipt, Colors.teal, 'Ticket', 'sale', data['id'])),
-                const SizedBox(width: 10),
-                Expanded(child: _buildPrintBtn(context, "A5", FontAwesomeIcons.fileLines, Colors.blueAccent, 'A5', 'sale', data['id'])),
-                const SizedBox(width: 10),
-                Expanded(child: _buildPrintBtn(context, "A4", FontAwesomeIcons.filePdf, Colors.redAccent, 'A4', 'sale', data['id'])),
-              ],
-            ),
-            const SizedBox(height: 15),
-            const Align(alignment: Alignment.centerLeft, child: Text("🚚 Imprimer Bon de Livraison :", style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.grey))),
-            const SizedBox(height: 8),
-            Row(
-              children: [
-                Expanded(child: _buildPrintBtn(context, "Ticket", FontAwesomeIcons.receipt, Colors.teal, 'Ticket', 'bl', data['id'])),
-                const SizedBox(width: 10),
-                Expanded(child: _buildPrintBtn(context, "A5", FontAwesomeIcons.fileLines, Colors.blueAccent, 'A5', 'bl', data['id'])),
-                const SizedBox(width: 10),
-                Expanded(child: _buildPrintBtn(context, "A4", FontAwesomeIcons.filePdf, Colors.redAccent, 'A4', 'bl', data['id'])),
-              ],
-            ),
-          ] else ...[
-            const Align(alignment: Alignment.centerLeft, child: Text("🛒 Imprimer Bon de Commande :", style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.grey))),
-            const SizedBox(height: 8),
-            Row(
-              children: [
-                Expanded(child: _buildPrintBtn(context, "Ticket", FontAwesomeIcons.receipt, Colors.teal, 'Ticket', 'purchase', data['id'])),
-                const SizedBox(width: 10),
-                Expanded(child: _buildPrintBtn(context, "A5", FontAwesomeIcons.fileLines, Colors.blueAccent, 'A5', 'purchase', data['id'])),
-                const SizedBox(width: 10),
-                Expanded(child: _buildPrintBtn(context, "A4", FontAwesomeIcons.filePdf, Colors.redAccent, 'A4', 'purchase', data['id'])),
-              ],
-            ),
-          ],
+          if (amountPaid > 0) _summaryRow("Versé", "${fmt.format(amountPaid)} DA", isDark, valueColor: Colors.green),
+          if (remaining > 0.5) _summaryRow("Reste à payer", "${fmt.format(remaining)} DA", isDark, valueColor: Colors.red, bold: true),
+          if (paymentType != null && paymentType.isNotEmpty)
+            _summaryRow("Paiement", paymentType == 'credit' ? 'Crédit' : paymentType == 'cash' ? 'Espèces' : paymentType, isDark),
         ],
       ),
     );
   }
 
-  // 🖨️ BOUTON IMPRESSION — ESC/POS pour Ticket, PDF via PC pour A4/A5
-  Widget _buildPrintBtn(BuildContext context, String label, IconData icon, Color color, String format, String docType, dynamic docId) {
-    return ElevatedButton(
-      onPressed: () async {
-        // 🟢 FORMAT TICKET = impression Bluetooth directe
-        if (format == 'Ticket') {
-          // Charger les items
-          final items = await (isSale ? api.getSaleItems(docId) : api.getPurchaseItems(docId));
-          if (!context.mounted) return;
-
-          showDialog(
-            context: context,
-            barrierDismissible: false,
-            builder: (ctx) => Dialog(
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
-              child: Padding(
-                padding: const EdgeInsets.all(20),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: const [
-                    CircularProgressIndicator(),
-                    SizedBox(width: 20),
-                    Text("Impression Bluetooth...", style: TextStyle(fontWeight: FontWeight.bold)),
-                  ],
-                ),
-              ),
-            ),
-          );
-
-          final printService = PrintService();
-          final success = await printService.printSaleTicket(
-            invoiceNumber: (data['invoice_number'] ?? data['number'] ?? docId).toString(),
-            items: items.map<Map<String, dynamic>>((e) => Map<String, dynamic>.from(e)).toList(),
-            totalTTC: double.tryParse(data['total_amount']?.toString() ?? '0') ?? 0,
-            totalHT: double.tryParse(data['total_ht']?.toString() ?? '0') ?? 0,
-            totalTVA: double.tryParse(data['total_vat']?.toString() ?? '0') ?? 0,
-            totalTimbre: double.tryParse(data['timbre']?.toString() ?? '0') ?? 0,
-            discount: double.tryParse(data['discount_value']?.toString() ?? '0') ?? 0,
-            amountPaid: double.tryParse(data['amount_paid']?.toString() ?? data['paid_amount']?.toString() ?? '0') ?? 0,
-            clientName: data['client_name'] ?? data['supplier_name'],
-            paymentType: data['payment_type'] ?? 'cash',
-            note: data['note'],
-          );
-
-          if (context.mounted) Navigator.pop(context);
-
-          if (context.mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(
-                content: Text(success ? "✅ Ticket imprimé !" : "❌ Vérifiez l'imprimante Bluetooth."),
-                backgroundColor: success ? Colors.green : Colors.red,
-              ),
-            );
-          }
-          return;
-        }
-
-        // 🔵 FORMAT A4/A5 = PDF via PC
-        final config = await showModalBottomSheet<Map<String, dynamic>>(
-          context: context,
-          isScrollControlled: true,
-          backgroundColor: Colors.transparent,
-          builder: (ctx) => PrintConfigModal(initialFormat: format),
-        );
-
-        if (config != null && context.mounted) {
-          showDialog(
-            context: context,
-            barrierDismissible: false,
-            builder: (ctx) => Dialog(
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
-              child: Padding(
-                padding: const EdgeInsets.all(20),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: const [
-                    CircularProgressIndicator(),
-                    SizedBox(width: 20),
-                    Text("Demande au PC...", style: TextStyle(fontWeight: FontWeight.bold)),
-                  ],
-                ),
-              ),
-            ),
-          );
-
-          final success = await api.printViaPC(
-            config['format'], 
-            docType, 
-            docId, 
-            options: config
-          );
-
-          if (context.mounted) Navigator.pop(context);
-
-          if (!success && context.mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Échec : Le PC est-il allumé et connecté ?")));
-          }
-        }
-      },
-      style: ElevatedButton.styleFrom(
-        backgroundColor: color.withOpacity(0.1),
-        foregroundColor: color,
-        elevation: 0,
-        padding: const EdgeInsets.symmetric(vertical: 12),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12), side: BorderSide(color: color.withOpacity(0.3))),
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
+  Widget _summaryRow(String label, String value, bool isDark, {Color? valueColor, bool bold = false}) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 3),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          Icon(icon, size: 20),
-          const SizedBox(height: 4),
-         Text(label, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
+          Text(label, style: TextStyle(fontSize: 13, color: isDark ? Colors.white60 : Colors.grey[600], fontWeight: bold ? FontWeight.bold : FontWeight.normal)),
+          Text(value, style: TextStyle(fontSize: 14, fontWeight: bold ? FontWeight.w900 : FontWeight.w600, color: valueColor ?? (isDark ? Colors.white : Colors.black), fontFeatures: const [FontFeature.tabularFigures()])),
         ],
       ),
+    );
+  }
+
+  Widget _infoChip(IconData icon, String text, bool isDark) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(icon, size: 14, color: Colors.grey[500]),
+        const SizedBox(width: 4),
+        Text(text, style: TextStyle(fontSize: 12, color: isDark ? Colors.white70 : Colors.black54)),
+      ],
     );
   }
 }
@@ -957,6 +741,7 @@ class _EditSaleSheet extends StatefulWidget {
   final double originalTva;
   final double originalTimbre;
   final double originalDiscount;
+  final double originalPaid;
 
   const _EditSaleSheet({
     required this.saleId,
@@ -967,6 +752,7 @@ class _EditSaleSheet extends StatefulWidget {
     this.originalTva = 0,
     this.originalTimbre = 0,
     this.originalDiscount = 0,
+    required this.originalPaid,
   });
 
   @override
@@ -975,11 +761,19 @@ class _EditSaleSheet extends StatefulWidget {
 
 class _EditSaleSheetState extends State<_EditSaleSheet> {
   late List<Map<String, dynamic>> _items;
+  late TextEditingController _paidCtrl;
   
   @override
   void initState() {
     super.initState();
     _items = widget.items.map((e) => Map<String, dynamic>.from(e)).toList();
+    _paidCtrl = TextEditingController(text: widget.originalPaid.toStringAsFixed(0));
+  }
+
+  @override
+  void dispose() {
+    _paidCtrl.dispose();
+    super.dispose();
   }
 
   double get _total => _items.fold(0.0, (sum, i) => sum + ((i['price'] ?? 0.0) * (i['qty'] ?? 1.0)));
@@ -993,30 +787,100 @@ class _EditSaleSheetState extends State<_EditSaleSheet> {
     setState(() => _items.removeAt(index));
   }
 
+  // 🛠️ MODULE 6 : Édition du prix unitaire d'un article
+  void _editItemPrice(int index) {
+    final ctrl = TextEditingController(text: (_items[index]['price'] ?? 0.0).toStringAsFixed(0));
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: Row(children: [
+          Icon(Icons.edit, color: Colors.blue[400], size: 22),
+          const SizedBox(width: 10),
+          const Flexible(child: Text('Modifier le Prix', style: TextStyle(fontWeight: FontWeight.w900))),
+        ]),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(_items[index]['name'] ?? 'Article', style: TextStyle(fontSize: 13, color: Colors.grey[500]), maxLines: 2, overflow: TextOverflow.ellipsis),
+            const SizedBox(height: 16),
+            TextField(
+              controller: ctrl,
+              keyboardType: const TextInputType.numberWithOptions(decimal: true),
+              autofocus: true,
+              textAlign: TextAlign.center,
+              style: const TextStyle(fontSize: 24, fontWeight: FontWeight.w900),
+              decoration: InputDecoration(
+                suffixText: 'DA',
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+                focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: Colors.blue, width: 2)),
+                contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: Text('Annuler', style: TextStyle(color: Colors.grey[500]))),
+          ElevatedButton(
+            onPressed: () {
+              final newPrice = double.tryParse(ctrl.text) ?? _items[index]['price'];
+              setState(() => _items[index]['price'] = newPrice);
+              Navigator.pop(ctx);
+            },
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.blue, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))),
+            child: const Text('Valider', style: TextStyle(color: Colors.white, fontWeight: FontWeight.w800)),
+          ),
+        ],
+      ),
+    );
+  }
+
   void _confirm() {
     if (_items.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("Le panier ne peut pas être vide."), backgroundColor: Colors.red),
-      );
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Le panier ne peut pas être vide."), backgroundColor: Colors.red));
       return;
     }
     
-    // 🟢 RECALCUL DU NOUVEAU TOTAL TTC AVEC LES TAXES D'ORIGINE
-    double newNetTotal = _total + widget.originalTva + widget.originalTimbre - widget.originalDiscount;
-    
-    Navigator.pop(context, {
-      'sale_id': widget.saleId,
-      'total': newNetTotal,
-      'items': _items,
-      'client_id': widget.clientId,
-      'amount_paid': newNetTotal,
-      'payment_type': 'cash',
-      'note': 'Modifié depuis Mobile',
-      'tva': widget.originalTva,
-      'timbre': widget.originalTimbre,
-      'discount': widget.originalDiscount,
-      'ht': _total,
-    });
+     // 🟢 RECALCUL EXACT (Évite de doubler la TVA ou le Timbre)
+     double newHt = 0;
+     double newTva = 0;
+     for (var i in _items) {
+       double pTtc = (i['price'] ?? 0.0).toDouble();
+       double qty = (i['qty'] ?? 1.0).toDouble();
+       double vatRate = (i['vat_percent'] ?? 0.0).toDouble();
+       
+       double pHt = pTtc;
+       if (vatRate > 0 && widget.originalTva > 0) { // Si TVA activée
+         pHt = pTtc / (1 + (vatRate / 100));
+         newTva += (pTtc - pHt) * qty;
+       }
+       newHt += pHt * qty;
+     }
+
+     double newTotalTTC = _total; // _total est déjà le TTC calculé en live
+     double newTimbre = 0;
+     
+     if (widget.originalTimbre > 0) {
+        double baseForTimbre = newTotalTTC - widget.originalDiscount;
+        if (baseForTimbre > 0) {
+            double tranches = (baseForTimbre / 100).ceilToDouble();
+            if (baseForTimbre <= 30000) newTimbre = tranches * 1.0;
+            else if (baseForTimbre <= 100000) newTimbre = tranches * 1.5;
+            else newTimbre = tranches * 2.0;
+            newTimbre = newTimbre.clamp(5.0, 10000.0);
+        }
+     }
+
+     double newNetTotal = newTotalTTC + newTimbre - widget.originalDiscount;
+     double paid = double.tryParse(_paidCtrl.text) ?? 0;
+     String pType = (newNetTotal - paid > 0.1) ? 'credit' : 'cash';
+
+     Navigator.pop(context, {
+       'sale_id': widget.saleId, 'total': newNetTotal, 'items': _items,
+       'client_id': widget.clientId, 'amount_paid': paid, 'payment_type': pType,
+       'note': 'Modifié depuis Mobile', 'tva': newTva, 'timbre': newTimbre,
+       'discount': widget.originalDiscount, 'ht': newHt,
+     });
   }
 
   @override
@@ -1025,7 +889,7 @@ class _EditSaleSheetState extends State<_EditSaleSheet> {
     
     return Container(
       height: MediaQuery.of(context).size.height * 0.75,
-      padding: const EdgeInsets.all(20),
+      padding: EdgeInsets.fromLTRB(20, 20, 20, MediaQuery.of(context).padding.bottom + 20), // 🛠️ MODULE 1 : Padding dynamique Android
       decoration: BoxDecoration(
         color: isDark ? const Color(0xFF1E1E2C) : Colors.white,
         borderRadius: const BorderRadius.vertical(top: Radius.circular(30)),
@@ -1087,7 +951,14 @@ class _EditSaleSheetState extends State<_EditSaleSheet> {
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Text(item['name'] ?? 'Article', style: TextStyle(fontWeight: FontWeight.bold, color: isDark ? Colors.white : Colors.black), maxLines: 1, overflow: TextOverflow.ellipsis),
-                            Text("${price.toStringAsFixed(0)} DA/u", style: const TextStyle(color: Colors.grey, fontSize: 12)),
+                            GestureDetector(
+                              onTap: () => _editItemPrice(i),
+                              child: Row(mainAxisSize: MainAxisSize.min, children: [
+                                Text("${price.toStringAsFixed(0)} DA/u", style: TextStyle(color: Colors.blue[400], fontSize: 12, decoration: TextDecoration.underline, decorationColor: Colors.blue[400])),
+                                const SizedBox(width: 4),
+                                Icon(Icons.edit, size: 11, color: Colors.blue[400]),
+                              ]),
+                            ),
                           ],
                         ),
                       ),
@@ -1120,6 +991,47 @@ class _EditSaleSheetState extends State<_EditSaleSheet> {
               ),
             ),
 
+          // 🛠️ MODULE 6 : Récapitulatif Comptable Complet
+          Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: isDark ? Colors.white.withOpacity(0.03) : Colors.grey.withOpacity(0.05),
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Column(
+              children: [
+                _buildSummaryRow("Total HT", "${_total.toStringAsFixed(0)} DA", isDark),
+                if (widget.originalTva > 0) _buildSummaryRow("TVA", "${widget.originalTva.toStringAsFixed(0)} DA", isDark),
+                if (widget.originalTimbre > 0) _buildSummaryRow("Timbre", "${widget.originalTimbre.toStringAsFixed(0)} DA", isDark),
+                if (widget.originalDiscount > 0) _buildSummaryRow("Remise", "-${widget.originalDiscount.toStringAsFixed(0)} DA", isDark, valueColor: Colors.red),
+                Divider(color: Colors.grey.withOpacity(0.2)),
+                _buildSummaryRow("Total TTC", "${(_total + widget.originalTva + widget.originalTimbre - widget.originalDiscount).toStringAsFixed(0)} DA", isDark, bold: true, valueColor: Colors.orange),
+              ],
+            ),
+          ),
+          const SizedBox(height: 8),
+
+           const Divider(),
+           Padding(
+             padding: const EdgeInsets.symmetric(vertical: 10),
+             child: Row(
+               children: [
+                 const Expanded(child: Text("Montant Versé :", style: TextStyle(fontWeight: FontWeight.bold))),
+                 SizedBox(
+                   width: 150,
+                   child: TextField(
+                     controller: _paidCtrl,
+                     keyboardType: TextInputType.number,
+                     textAlign: TextAlign.right,
+                     style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18, color: Colors.green),
+                     decoration: const InputDecoration(suffixText: " DA", border: OutlineInputBorder(), contentPadding: EdgeInsets.symmetric(horizontal: 10)),
+                   ),
+                 ),
+               ],
+             ),
+           ),
+           const SizedBox(height: 10),
+
           // Confirm button
           SizedBox(
             width: double.infinity, height: 55,
@@ -1138,6 +1050,20 @@ class _EditSaleSheetState extends State<_EditSaleSheet> {
       ),
     );
   }
+
+  // 🛠️ MODULE 6 : Helper ligne de récapitulatif
+  Widget _buildSummaryRow(String label, String value, bool isDark, {Color? valueColor, bool bold = false}) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 3),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Text(label, style: TextStyle(fontSize: 13, color: isDark ? Colors.white60 : Colors.grey[600], fontWeight: bold ? FontWeight.bold : FontWeight.normal)),
+          Text(value, style: TextStyle(fontSize: 14, fontWeight: bold ? FontWeight.w900 : FontWeight.w600, color: valueColor ?? (isDark ? Colors.white : Colors.black))),
+        ],
+      ),
+    );
+  }
 }
 
 // =============================================================================
@@ -1152,6 +1078,7 @@ class _EditPurchaseSheet extends StatefulWidget {
   final double originalTva;
   final double originalTimbre;
   final double originalDiscount;
+  final double originalPaid;
 
   const _EditPurchaseSheet({
     required this.poId,
@@ -1162,6 +1089,7 @@ class _EditPurchaseSheet extends StatefulWidget {
     this.originalTva = 0,
     this.originalTimbre = 0,
     this.originalDiscount = 0,
+    required this.originalPaid,
   });
 
   @override
@@ -1170,11 +1098,19 @@ class _EditPurchaseSheet extends StatefulWidget {
 
 class _EditPurchaseSheetState extends State<_EditPurchaseSheet> {
   late List<Map<String, dynamic>> _items;
+  late TextEditingController _paidCtrl;
   
   @override
   void initState() {
     super.initState();
     _items = widget.items.map((e) => Map<String, dynamic>.from(e)).toList();
+    _paidCtrl = TextEditingController(text: widget.originalPaid.toStringAsFixed(0));
+  }
+
+  @override
+  void dispose() {
+    _paidCtrl.dispose();
+    super.dispose();
   }
 
   double get _total => _items.fold(0.0, (sum, i) => sum + ((i['price'] ?? 0.0) * (i['qty'] ?? 1.0)));
@@ -1188,29 +1124,94 @@ class _EditPurchaseSheetState extends State<_EditPurchaseSheet> {
     setState(() => _items.removeAt(index));
   }
 
+  // 🛠️ MODULE 6 : Édition du prix unitaire d'un article
+  void _editItemPrice(int index) {
+    final ctrl = TextEditingController(text: (_items[index]['price'] ?? 0.0).toStringAsFixed(0));
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: Row(children: [
+          Icon(Icons.edit, color: Colors.blue[400], size: 22),
+          const SizedBox(width: 10),
+          const Flexible(child: Text('Modifier le Prix', style: TextStyle(fontWeight: FontWeight.w900))),
+        ]),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(_items[index]['name'] ?? 'Article', style: TextStyle(fontSize: 13, color: Colors.grey[500]), maxLines: 2, overflow: TextOverflow.ellipsis),
+            const SizedBox(height: 16),
+            TextField(
+              controller: ctrl,
+              keyboardType: const TextInputType.numberWithOptions(decimal: true),
+              autofocus: true,
+              textAlign: TextAlign.center,
+              style: const TextStyle(fontSize: 24, fontWeight: FontWeight.w900),
+              decoration: InputDecoration(
+                suffixText: 'DA',
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+                focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: Colors.blue, width: 2)),
+                contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: Text('Annuler', style: TextStyle(color: Colors.grey[500]))),
+          ElevatedButton(
+            onPressed: () {
+              final newPrice = double.tryParse(ctrl.text) ?? _items[index]['price'];
+              setState(() => _items[index]['price'] = newPrice);
+              Navigator.pop(ctx);
+            },
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.blue, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))),
+            child: const Text('Valider', style: TextStyle(color: Colors.white, fontWeight: FontWeight.w800)),
+          ),
+        ],
+      ),
+    );
+  }
+
   void _confirm() {
     if (_items.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("La liste ne peut pas être vide."), backgroundColor: Colors.red),
-      );
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("La liste ne peut pas être vide."), backgroundColor: Colors.red));
       return;
     }
     
-    double newNetTotal = _total + widget.originalTva + widget.originalTimbre - widget.originalDiscount;
-    
-    Navigator.pop(context, {
-      'po_id': widget.poId,
-      'total': newNetTotal,
-      'items': _items,
-      'supplier_id': widget.supplierId,
-      'amount_paid': newNetTotal,
-      'payment_type': 'cash',
-      'note': 'Modifié depuis Mobile',
-      'tva': widget.originalTva,
-      'timbre': widget.originalTimbre,
-      'discount': widget.originalDiscount,
-      'ht': _total,
-    });
+     // 🟢 RECALCUL EXACT ACHATS (Prix de base est HT)
+     double newHt = _total;
+     double newTva = 0;
+     for (var i in _items) {
+       double pCost = (i['price'] ?? 0.0).toDouble(); // Pour les achats, 'price' dans le state contient le PMP/Cout HT
+       double qty = (i['qty'] ?? 1.0).toDouble();
+       double vatRate = (i['vat_percent'] ?? 0.0).toDouble();
+       if (vatRate > 0 && widget.originalTva > 0) {
+           newTva += (pCost * qty) * (vatRate / 100);
+       }
+     }
+
+     double newTimbre = 0;
+     if (widget.originalTimbre > 0) {
+        double baseTtc = newHt + newTva - widget.originalDiscount;
+        if (baseTtc > 0) {
+            double tranches = (baseTtc / 100).ceilToDouble();
+            if (baseTtc <= 30000) newTimbre = tranches * 1.0;
+            else if (baseTtc <= 100000) newTimbre = tranches * 1.5;
+            else newTimbre = tranches * 2.0;
+            newTimbre = newTimbre.clamp(5.0, 10000.0);
+        }
+     }
+
+     double newNetTotal = newHt + newTva + newTimbre - widget.originalDiscount;
+     double paid = double.tryParse(_paidCtrl.text) ?? 0;
+     String pType = (newNetTotal - paid > 0.1) ? 'credit' : 'cash';
+
+     Navigator.pop(context, {
+       'po_id': widget.poId, 'total': newNetTotal, 'items': _items,
+       'supplier_id': widget.supplierId, 'amount_paid': paid, 'payment_type': pType,
+       'note': 'Modifié depuis Mobile', 'tva': newTva, 'timbre': newTimbre,
+       'discount': widget.originalDiscount, 'ht': newHt,
+     });
   }
 
   @override
@@ -1219,7 +1220,7 @@ class _EditPurchaseSheetState extends State<_EditPurchaseSheet> {
     
     return Container(
       height: MediaQuery.of(context).size.height * 0.75,
-      padding: const EdgeInsets.all(20),
+      padding: EdgeInsets.fromLTRB(20, 20, 20, MediaQuery.of(context).padding.bottom + 20), // 🛠️ MODULE 1 : Padding dynamique Android
       decoration: BoxDecoration(
         color: isDark ? const Color(0xFF1E1E2C) : Colors.white,
         borderRadius: const BorderRadius.vertical(top: Radius.circular(30)),
@@ -1277,7 +1278,14 @@ class _EditPurchaseSheetState extends State<_EditPurchaseSheet> {
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Text(item['name'] ?? 'Article', style: TextStyle(fontWeight: FontWeight.bold, color: isDark ? Colors.white : Colors.black), maxLines: 1, overflow: TextOverflow.ellipsis),
-                            Text("${price.toStringAsFixed(0)} DA/u", style: const TextStyle(color: Colors.grey, fontSize: 12)),
+                            GestureDetector(
+                              onTap: () => _editItemPrice(i),
+                              child: Row(mainAxisSize: MainAxisSize.min, children: [
+                                Text("${price.toStringAsFixed(0)} DA/u", style: TextStyle(color: Colors.blue[400], fontSize: 12, decoration: TextDecoration.underline, decorationColor: Colors.blue[400])),
+                                const SizedBox(width: 4),
+                                Icon(Icons.edit, size: 11, color: Colors.blue[400]),
+                              ]),
+                            ),
                           ],
                         ),
                       ),
@@ -1307,6 +1315,47 @@ class _EditPurchaseSheetState extends State<_EditPurchaseSheet> {
               ),
             ),
 
+          // 🛠️ MODULE 6 : Récapitulatif Comptable Complet
+          Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: isDark ? Colors.white.withOpacity(0.03) : Colors.grey.withOpacity(0.05),
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Column(
+              children: [
+                _buildSummaryRow("Total HT", "${_total.toStringAsFixed(0)} DA", isDark),
+                if (widget.originalTva > 0) _buildSummaryRow("TVA", "${widget.originalTva.toStringAsFixed(0)} DA", isDark),
+                if (widget.originalTimbre > 0) _buildSummaryRow("Timbre", "${widget.originalTimbre.toStringAsFixed(0)} DA", isDark),
+                if (widget.originalDiscount > 0) _buildSummaryRow("Remise", "-${widget.originalDiscount.toStringAsFixed(0)} DA", isDark, valueColor: Colors.red),
+                Divider(color: Colors.grey.withOpacity(0.2)),
+                _buildSummaryRow("Total TTC", "${(_total + widget.originalTva + widget.originalTimbre - widget.originalDiscount).toStringAsFixed(0)} DA", isDark, bold: true, valueColor: Colors.orange),
+              ],
+            ),
+          ),
+          const SizedBox(height: 8),
+
+           const Divider(),
+           Padding(
+             padding: const EdgeInsets.symmetric(vertical: 10),
+             child: Row(
+               children: [
+                 const Expanded(child: Text("Montant Versé :", style: TextStyle(fontWeight: FontWeight.bold))),
+                 SizedBox(
+                   width: 150,
+                   child: TextField(
+                     controller: _paidCtrl,
+                     keyboardType: TextInputType.number,
+                     textAlign: TextAlign.right,
+                     style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18, color: Colors.green),
+                     decoration: const InputDecoration(suffixText: " DA", border: OutlineInputBorder(), contentPadding: EdgeInsets.symmetric(horizontal: 10)),
+                   ),
+                 ),
+               ],
+             ),
+           ),
+           const SizedBox(height: 10),
+
           SizedBox(
             width: double.infinity, height: 55,
             child: ElevatedButton.icon(
@@ -1320,6 +1369,20 @@ class _EditPurchaseSheetState extends State<_EditPurchaseSheet> {
               ),
             ),
           ),
+        ],
+      ),
+    );
+  }
+
+  // 🛠️ MODULE 6 : Helper ligne de récapitulatif
+  Widget _buildSummaryRow(String label, String value, bool isDark, {Color? valueColor, bool bold = false}) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 3),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Text(label, style: TextStyle(fontSize: 13, color: isDark ? Colors.white60 : Colors.grey[600], fontWeight: bold ? FontWeight.bold : FontWeight.normal)),
+          Text(value, style: TextStyle(fontSize: 14, fontWeight: bold ? FontWeight.w900 : FontWeight.w600, color: valueColor ?? (isDark ? Colors.white : Colors.black))),
         ],
       ),
     );

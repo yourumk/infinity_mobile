@@ -39,6 +39,7 @@ class _ArticlesPageState extends State<ArticlesPage> {
   String _selectedCategory = 'Tout';
   String _selectedSubCategory = 'Tout';
   String _activeSmartFilter = 'none';
+  String _stockFilter = 'Tout'; // 🟢 AJOUT DU FILTRE DE STOCK MANQUANT
   bool _isLoading = true;
   bool _enableTva = false; // 🟢 AJOUT TVA
 
@@ -157,6 +158,19 @@ _currentSubCategories = ['Tout', ...filteredSubSet];
     }
   }
 
+  // 🟢 FIX: Calcule le stock effectif en tenant compte des variantes
+  double _getEffectiveStock(dynamic p) {
+    final variants = p['variants'];
+    if (variants != null && variants is List && variants.isNotEmpty) {
+      double total = 0;
+      for (var v in variants) {
+        total += double.tryParse(v['stock']?.toString() ?? '0') ?? 0;
+      }
+      return total;
+    }
+    return double.tryParse(p['stock']?.toString() ?? '0') ?? 0;
+  }
+
  void _applyFilters() {
     final query = _searchController.text.toLowerCase().trim();
     List<dynamic> temp = _allProducts.where((p) {
@@ -197,9 +211,21 @@ _currentSubCategories = ['Tout', ...filteredSubSet];
       temp = temp.where((p) => (int.tryParse(p['is_favorite']?.toString() ?? '0') ?? 0) == 1).toList();
     } else if (_activeSmartFilter == 'low') {
       temp = temp.where((p) {
-        final stock = double.tryParse(p['stock']?.toString() ?? '0') ?? 0;
+        final stock = _getEffectiveStock(p);
         final min = double.tryParse(p['min_stock']?.toString() ?? '5') ?? 5;
         return stock <= min;
+      }).toList();
+    }
+
+    // 🟢 INCLUSION DES FILTRES DE REPTURE / STOCK BAS
+    if (_stockFilter != 'Tout') {
+      temp = temp.where((p) {
+        final stock = _getEffectiveStock(p);
+        final min = double.tryParse(p['min_stock']?.toString() ?? '5') ?? 5;
+        if (_stockFilter == 'En Stock') return stock > 0;
+        if (_stockFilter == 'Stock Bas') return stock > 0 && stock <= min;
+        if (_stockFilter == 'Rupture') return stock <= 0;
+        return true;
       }).toList();
     }
 
@@ -378,30 +404,85 @@ onProductUpdate: (updatedData) async { // 🟢 AJOUT DE async
     );
   }
 
-  Widget _buildSmartFilterBtn(String id, String label, IconData icon, Color color, bool isDark) {
-    final bool isActive = _activeSmartFilter == id;
-    return Padding(
-      padding: const EdgeInsets.only(right: 10),
-      child: GestureDetector(
-        onTap: () { setState(() { _activeSmartFilter = isActive ? 'none' : id; _applyFilters(); }); },
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 200),
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-          decoration: BoxDecoration(
-            color: isActive ? color : (isDark ? Colors.white.withOpacity(0.05) : Colors.white),
-            borderRadius: BorderRadius.circular(20),
-            border: Border.all(color: isActive ? color : (isDark ? Colors.white10 : Colors.grey[300]!), width: 1),
-            boxShadow: isActive ? [BoxShadow(color: color.withOpacity(0.4), blurRadius: 8, offset: const Offset(0, 4))] : [],
-          ),
-          child: Row(
-            children: [
-              Icon(icon, size: 14, color: isActive ? Colors.white : color),
-              const SizedBox(width: 8),
-              Text(label, style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: isActive ? Colors.white : (isDark ? Colors.white70 : Colors.black87))),
-            ],
-          ),
-        ),
-      ),
+  void _showFilterSheet() {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    showModalBottomSheet(
+      context: context, isScrollControlled: true, backgroundColor: Colors.transparent,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setSheetState) {
+          Widget buildChip(String label, bool isSelected, Function(bool) onSel) {
+            return FilterChip(
+              label: Text(label, style: const TextStyle(fontSize: 12)), selected: isSelected,
+              onSelected: (val) { setSheetState(() => onSel(val)); setState(() { onSel(val); _applyFilters(); }); },
+              backgroundColor: isDark ? Colors.white.withOpacity(0.05) : Colors.grey[100], selectedColor: AppColors.primary.withOpacity(0.2), checkmarkColor: AppColors.primary,
+              labelStyle: TextStyle(color: isSelected ? AppColors.primary : (isDark ? Colors.white70 : Colors.black87), fontWeight: isSelected ? FontWeight.bold : FontWeight.normal),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10), side: BorderSide(color: isSelected ? AppColors.primary : Colors.transparent)),
+            );
+          }
+          return Container(
+            padding: const EdgeInsets.all(20), decoration: BoxDecoration(color: isDark ? const Color(0xFF1E1E2C) : Colors.white, borderRadius: const BorderRadius.vertical(top: Radius.circular(25))),
+            child: Column(
+              mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+                  const Text("Filtres", style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                  TextButton(
+                    onPressed: () { setSheetState(() { _selectedCategory = 'Tout'; _selectedSubCategory = 'Tout'; _activeSmartFilter = 'none'; _stockFilter = 'Tout'; }); setState(() { _selectedCategory = 'Tout'; _selectedSubCategory = 'Tout'; _activeSmartFilter = 'none'; _stockFilter = 'Tout'; _applyFilters(); }); },
+                    child: const Text("Réinitialiser", style: TextStyle(color: Colors.red)),
+                  )
+                ]),
+                const SizedBox(height: 15),
+                const Text("Catégories", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.grey)), const SizedBox(height: 10),
+                SizedBox(
+                  height: 38,
+                  child: SingleChildScrollView(
+                    scrollDirection: Axis.horizontal, physics: const BouncingScrollPhysics(),
+                    child: Row(children: _categories.map((c) => buildChip(c, _selectedCategory == c, (v) { if (v) { _selectedCategory = c; _updateSubCategoryList(); } })).toList()),
+                  ),
+                ),
+                if (_currentSubCategories.isNotEmpty) ...[
+                  const SizedBox(height: 15), const Text("Sous-catégories", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.grey)), const SizedBox(height: 10),
+                  SizedBox(
+                    height: 38,
+                    child: SingleChildScrollView(
+                      scrollDirection: Axis.horizontal, physics: const BouncingScrollPhysics(),
+                      child: Row(children: _currentSubCategories.map((s) => buildChip(s, _selectedSubCategory == s, (v) { if (v) _selectedSubCategory = s; })).toList()),
+                    ),
+                  ),
+                ],
+                const SizedBox(height: 15),
+                const Text("État du Stock", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.grey)), const SizedBox(height: 10),
+                SizedBox(
+                  height: 38,
+                  child: SingleChildScrollView(
+                    scrollDirection: Axis.horizontal, physics: const BouncingScrollPhysics(),
+                    child: Row(children: ['Tout', 'En Stock', 'Stock Bas', 'Rupture'].map((st) => buildChip(st, _stockFilter == st, (v) { if (v) _stockFilter = st; })).toList()),
+                  ),
+                ),
+                const SizedBox(height: 15),
+                const Text("Filtres rapides", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.grey)), const SizedBox(height: 10),
+                SizedBox(
+                  height: 38,
+                  child: SingleChildScrollView(
+                    scrollDirection: Axis.horizontal, physics: const BouncingScrollPhysics(),
+                    child: Row(children: [
+                      buildChip("Nouveaux", _activeSmartFilter == 'new', (v) => _activeSmartFilter = v ? 'new' : 'none'),
+                      buildChip("Top Ventes", _activeSmartFilter == 'top', (v) => _activeSmartFilter = v ? 'top' : 'none'),
+                      buildChip("Critique (Stock)", _activeSmartFilter == 'low', (v) => _activeSmartFilter = v ? 'low' : 'none'),
+                      buildChip("Favoris", _activeSmartFilter == 'fav', (v) => _activeSmartFilter = v ? 'fav' : 'none'),
+                    ]),
+                  ),
+                ),
+                const SizedBox(height: 30),
+                SafeArea(
+                  top: false,
+                  child: SizedBox(width: double.infinity, height: 50, child: ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: AppColors.primary, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15))), onPressed: () => Navigator.pop(ctx), child: const Text("Appliquer", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)))),
+                )
+              ],
+            ),
+          );
+        }
+      )
     );
   }
 
@@ -412,8 +493,6 @@ onProductUpdate: (updatedData) async { // 🟢 AJOUT DE async
 
     return Scaffold(
       backgroundColor: bgColor,
-      extendBody: true,
-      extendBodyBehindAppBar: true,
       body: SafeArea(
         bottom: false,
         child: Column(
@@ -488,102 +567,53 @@ onProductUpdate: (updatedData) async { // 🟢 AJOUT DE async
                   ),
                   const SizedBox(height: 20),
                   
-                  Container(
-                    height: 50,
-                    decoration: BoxDecoration(color: isDark ? const Color(0xFF1C1C1E) : Colors.white, borderRadius: BorderRadius.circular(15), border: Border.all(color: isDark ? Colors.white10 : Colors.grey[300]!)),
-                    child: TextField(
-                      controller: _searchController,
-                      onChanged: (v) => _applyFilters(),
-                      style: TextStyle(color: isDark ? Colors.white : Colors.black),
-                      decoration: InputDecoration(
-                        hintText: "Chercher (Nom, Réf, Code)...",
-                        hintStyle: TextStyle(color: Colors.grey[500]),
-                        prefixIcon: Icon(Icons.search, color: Colors.grey[500]),
-                        suffixIcon: IconButton(
-                          icon: const Icon(Icons.qr_code_scanner, color: AppColors.primary),
-                          onPressed: () => _scanBarcode(_searchController, autoSearch: true),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Container(
+                          height: 50,
+                          decoration: BoxDecoration(color: isDark ? const Color(0xFF1C1C1E) : Colors.white, borderRadius: BorderRadius.circular(15), border: Border.all(color: isDark ? Colors.white10 : Colors.grey[300]!)),
+                          child: TextField(
+                            controller: _searchController,
+                            onChanged: (v) => _applyFilters(),
+                            style: TextStyle(color: isDark ? Colors.white : Colors.black),
+                            decoration: InputDecoration(
+                              hintText: "Chercher (Nom, Réf, Code)...",
+                              hintStyle: TextStyle(color: Colors.grey[500]),
+                              prefixIcon: Icon(Icons.search, color: Colors.grey[500]),
+                              suffixIcon: IconButton(
+                                icon: const Icon(Icons.qr_code_scanner, color: AppColors.primary),
+                                onPressed: () => _scanBarcode(_searchController, autoSearch: true),
+                              ),
+                              border: InputBorder.none,
+                              contentPadding: const EdgeInsets.symmetric(vertical: 13),
+                              isDense: true,
+                            ),
+                          ),
                         ),
-                        border: InputBorder.none,
-                        contentPadding: const EdgeInsets.symmetric(vertical: 13),
-                        isDense: true,
                       ),
-                    ),
+                      const SizedBox(width: 10),
+                      // 🟢 BOUTON FILTRE UNIQUE
+                      GestureDetector(
+                        onTap: _showFilterSheet,
+                        child: Container(
+                          height: 50, width: 50,
+                          decoration: BoxDecoration(
+                            color: (_selectedCategory != 'Tout' || _activeSmartFilter != 'none') 
+                                ? AppColors.primary 
+                                : (isDark ? Colors.white10 : Colors.white),
+                            borderRadius: BorderRadius.circular(15),
+                            border: Border.all(color: isDark ? Colors.white10 : Colors.grey[300]!),
+                          ),
+                          child: Icon(Icons.tune, color: (_selectedCategory != 'Tout' || _activeSmartFilter != 'none') ? Colors.white : (isDark ? Colors.white70 : Colors.grey[700])),
+                        ),
+                      ),
+                    ],
                   ),
                 ],
               ),
             ),
             const SizedBox(height: 15),
-            
-            SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
-              padding: const EdgeInsets.symmetric(horizontal: 20),
-              child: Row(
-                children: [
-                  _buildSmartFilterBtn('new', 'Nouveaux', FontAwesomeIcons.wandMagicSparkles, Colors.blue, isDark),
-                  _buildSmartFilterBtn('top', 'Top Ventes', FontAwesomeIcons.fire, Colors.orange, isDark),
-                  _buildSmartFilterBtn('low', 'Critique', FontAwesomeIcons.triangleExclamation, Colors.red, isDark),
-                  _buildSmartFilterBtn('fav', 'Favoris', FontAwesomeIcons.heart, Colors.pink, isDark),
-                ],
-              ),
-            ),
-            const SizedBox(height: 15),
-            
-            SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
-              padding: const EdgeInsets.symmetric(horizontal: 20),
-              child: Row(
-                children: _categories.map((cat) {
-                  final isSelected = _selectedCategory == cat;
-                  return Padding(
-                    padding: const EdgeInsets.only(right: 10),
-                    child: GestureDetector(
-                      onTap: () { setState(() { _selectedCategory = cat; _updateSubCategoryList(); _applyFilters(); }); },
-                      child: AnimatedContainer(
-                        duration: const Duration(milliseconds: 200),
-                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                        decoration: BoxDecoration(
-                          color: isSelected ? const Color(0xFF2D2D44) : Colors.transparent,
-                          borderRadius: BorderRadius.circular(30),
-                          border: Border.all(color: isSelected ? Colors.transparent : (isDark ? Colors.white10 : Colors.grey[400]!)),
-                        ),
-                        child: Text(cat, style: TextStyle(color: isSelected ? Colors.white : Colors.grey, fontWeight: FontWeight.bold, fontSize: 12)),
-                      ),
-                    ),
-                  );
-                }).toList(),
-              ),
-            ),
-            
-            if (_currentSubCategories.isNotEmpty) ...[
-              const SizedBox(height: 10),
-              SingleChildScrollView(
-                scrollDirection: Axis.horizontal,
-                padding: const EdgeInsets.symmetric(horizontal: 20),
-                child: Row(
-                  children: _currentSubCategories.map((sub) {
-                    final isSelected = _selectedSubCategory == sub;
-                    return Padding(
-                      padding: const EdgeInsets.only(right: 8),
-                      child: GestureDetector(
-                        onTap: () { setState(() { _selectedSubCategory = sub; _applyFilters(); }); },
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                          decoration: BoxDecoration(
-                            color: isSelected ? AppColors.primary.withOpacity(0.1) : Colors.transparent,
-                            borderRadius: BorderRadius.circular(15),
-                            border: Border.all(color: isSelected ? AppColors.primary : Colors.grey.withOpacity(0.3)),
-                          ),
-                          child: Text(sub, style: TextStyle(fontSize: 11, color: isSelected ? AppColors.primary : Colors.grey, fontWeight: FontWeight.bold)),
-                        ),
-                      ),
-                    );
-                  }).toList(),
-                ),
-              ),
-            ],
-
-            const SizedBox(height: 10),
-            
             Expanded(
               child: _isLoading 
                 ? const Center(child: CircularProgressIndicator(color: AppColors.primary))
@@ -595,8 +625,9 @@ onProductUpdate: (updatedData) async { // 🟢 AJOUT DE async
                     child: _filteredProducts.isEmpty 
                       ? Center(child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [Icon(Icons.search_off, size: 50, color: Colors.grey.withOpacity(0.3)), const SizedBox(height: 10), Text("Aucun article trouvé", style: TextStyle(color: Colors.grey[500]))]))
                      : ListView.builder(
+                          key: const ValueKey('articles_product_list'),
                           padding: const EdgeInsets.fromLTRB(20, 10, 20, 80),
-                          physics: const BouncingScrollPhysics(),
+                          physics: const AlwaysScrollableScrollPhysics(parent: BouncingScrollPhysics()),
                           itemCount: _filteredProducts.length,
                           itemBuilder: (ctx, i) {
                            final p = Map<String, dynamic>.from(_filteredProducts[i] as Map);
@@ -609,7 +640,9 @@ onProductUpdate: (updatedData) async { // 🟢 AJOUT DE async
                             final isLow = stock <= minStock;
                             final totalSold = int.tryParse(p['total_sold']?.toString() ?? '0') ?? 0;
 
-                            return Padding(
+                            return KeyedSubtree(
+                              key: ValueKey('article_${p['id']}'),
+                              child: Padding(
                               padding: const EdgeInsets.only(bottom: 12),
                               child: GestureDetector(
                                 onTap: () => _openProductSheet(p),
@@ -636,7 +669,7 @@ onProductUpdate: (updatedData) async { // 🟢 AJOUT DE async
                                                   : null,
                                             ),
                                             child: cleanUrl == null
-                                                ? Icon(isLow ? FontAwesomeIcons.triangleExclamation : FontAwesomeIcons.boxOpen, color: isLow ? Colors.red : Colors.blue, size: 22)
+                                                ? Center(child: Icon(isLow ? FontAwesomeIcons.triangleExclamation : FontAwesomeIcons.boxOpen, color: isLow ? Colors.red : Colors.blue, size: 22))
                                                 : null,
                                           );
                                         }
@@ -684,6 +717,7 @@ onProductUpdate: (updatedData) async { // 🟢 AJOUT DE async
                                   ),
                                 ),
                               ),
+                            ),
                             );
                           },
                         ),
@@ -804,21 +838,22 @@ Future<void> _submit() async {
 
     ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Sauvegarde en cours..."), duration: Duration(seconds: 1)));
 
+   // 🟢 CORRECTION : Remplacement de la virgule par un point pour éviter le retour à 0
     await widget.api.saveProduct(
       id: tempId, 
       name: _nameCtrl.text.trim(),
-      price: double.tryParse(_priceCtrl.text) ?? 0,
-      cost: double.tryParse(_costCtrl.text) ?? 0,
-      stock: double.tryParse(_stockCtrl.text) ?? 0,
+      price: double.tryParse(_priceCtrl.text.replaceAll(',', '.')) ?? 0,
+      cost: double.tryParse(_costCtrl.text.replaceAll(',', '.')) ?? 0,
+      stock: double.tryParse(_stockCtrl.text.replaceAll(',', '.')) ?? 0,
       barcode: _barcodeCtrl.text.trim(),
       reference: _refCtrl.text.trim(),
       category: _catCtrl.text.trim(),
       subCategory: _subCatCtrl.text.trim(),
-      priceSemi: double.tryParse(_priceSemiCtrl.text) ?? 0,
-      priceWhol: double.tryParse(_priceWholCtrl.text) ?? 0,
+      priceSemi: double.tryParse(_priceSemiCtrl.text.replaceAll(',', '.')) ?? 0,
+      priceWhol: double.tryParse(_priceWholCtrl.text.replaceAll(',', '.')) ?? 0,
       unit: _unitCtrl.text.trim(),
-      packing: double.tryParse(_packingCtrl.text) ?? 1,
-      minStock: double.tryParse(_minStockCtrl.text) ?? 5,
+      packing: double.tryParse(_packingCtrl.text.replaceAll(',', '.')) ?? 1,
+      minStock: double.tryParse(_minStockCtrl.text.replaceAll(',', '.')) ?? 5,
       vatPercent: _vatPercent 
     );
     
@@ -877,7 +912,7 @@ Future<void> _submit() async {
               ),
             ),
             Padding(
-              padding: const EdgeInsets.all(20),
+              padding: EdgeInsets.fromLTRB(20, 20, 20, MediaQuery.of(context).padding.bottom + 20), // 🛠️ MODULE 1 : Padding dynamique Android
               child: SizedBox(
                 width: double.infinity, height: 55,
                 child: ElevatedButton(
@@ -981,7 +1016,7 @@ Widget _buildPricesTab(bool isDark) {
     ]);
   }
 
-  Widget _buildInput(String label, IconData icon, TextEditingController ctrl, bool isDark, {bool isNum = false, List<String>? suggestions, bool withScan = false}) {
+ Widget _buildInput(String label, IconData icon, TextEditingController ctrl, bool isDark, {bool isNum = false, List<String>? suggestions, bool withScan = false}) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -991,7 +1026,8 @@ Widget _buildPricesTab(bool isDark) {
         ),
         TextFormField(
           controller: ctrl,
-          keyboardType: isNum ? TextInputType.number : TextInputType.text,
+          // 🟢 CORRECTION : Force l'apparition du point/virgule sur Android/iOS
+          keyboardType: isNum ? const TextInputType.numberWithOptions(decimal: true) : TextInputType.text,
           style: TextStyle(color: isDark ? Colors.white : Colors.black),
           decoration: InputDecoration(
             prefixIcon: Icon(icon, color: AppColors.primary, size: 18),
@@ -1141,7 +1177,7 @@ late TextEditingController _warehouseCtrl, _aisleCtrl, _shelfCtrl;
       locs.add({'warehouse': _warehouseCtrl.text, 'aisle': _aisleCtrl.text, 'shelf': _shelfCtrl.text});
     }
 
-    final updatedData = {
+   final updatedData = {
       "id": widget.product['id'],
       "name": _nameCtrl.text.trim(),
       "stock": widget.product['stock'],
@@ -1149,13 +1185,14 @@ late TextEditingController _warehouseCtrl, _aisleCtrl, _shelfCtrl;
       "sub_category": _subCatCtrl.text.trim(),
       "barcode": _barcodeCtrl.text.trim(),
       "ref": _refCtrl.text.trim(),
-      "price": double.tryParse(_priceCtrl.text) ?? 0,
-      "cost": double.tryParse(_costCtrl.text) ?? 0,
-      "price_semi": double.tryParse(_priceSemiCtrl.text) ?? 0,
-      "price_whol": double.tryParse(_priceWholCtrl.text) ?? 0,
-      "min_stock": double.tryParse(_minStockCtrl.text) ?? 5,
+      // 🟢 CORRECTION : Tolérance de la virgule sur l'édition des prix
+      "price": double.tryParse(_priceCtrl.text.replaceAll(',', '.')) ?? 0,
+      "cost": double.tryParse(_costCtrl.text.replaceAll(',', '.')) ?? 0,
+      "price_semi": double.tryParse(_priceSemiCtrl.text.replaceAll(',', '.')) ?? 0,
+      "price_whol": double.tryParse(_priceWholCtrl.text.replaceAll(',', '.')) ?? 0,
+      "min_stock": double.tryParse(_minStockCtrl.text.replaceAll(',', '.')) ?? 5,
       "unit": _unitCtrl.text.trim(),
-      "packing": double.tryParse(_packingCtrl.text) ?? 1,
+      "packing": double.tryParse(_packingCtrl.text.replaceAll(',', '.')) ?? 1,
       "vat_percent": _vatPercent, 
       "locations": locs,
       "characteristics": widget.product['characteristics'],
@@ -1237,9 +1274,9 @@ late TextEditingController _warehouseCtrl, _aisleCtrl, _shelfCtrl;
               child: TabBarView(
                 controller: _tabController,
                 children: [
-                  SingleChildScrollView(padding: const EdgeInsets.all(20), child: _isEditing ? _buildEditInfo(isDark) : _buildViewInfo(isDark)),
-                  SingleChildScrollView(padding: const EdgeInsets.all(20), child: _isEditing ? _buildEditStock(isDark) : _buildViewStock(isDark)),
-                  SingleChildScrollView(padding: const EdgeInsets.all(20), child: _isEditing ? _buildEditLocation(isDark) : _buildViewLocation(isDark)),
+                  SingleChildScrollView(padding: EdgeInsets.fromLTRB(20, 20, 20, MediaQuery.of(context).padding.bottom + 20), child: _isEditing ? _buildEditInfo(isDark) : _buildViewInfo(isDark)), // 🛠️ MODULE 1
+                  SingleChildScrollView(padding: EdgeInsets.fromLTRB(20, 20, 20, MediaQuery.of(context).padding.bottom + 20), child: _isEditing ? _buildEditStock(isDark) : _buildViewStock(isDark)), // 🛠️ MODULE 1
+                  SingleChildScrollView(padding: EdgeInsets.fromLTRB(20, 20, 20, MediaQuery.of(context).padding.bottom + 20), child: _isEditing ? _buildEditLocation(isDark) : _buildViewLocation(isDark)), // 🛠️ MODULE 1
                 ],
               ),
             ),
@@ -1463,7 +1500,7 @@ if (variants.isNotEmpty) ...[
     ]);
   }
 
-  // ✅ MODIFIÉ POUR INCLURE LE SCANNER
+ // ✅ MODIFIÉ POUR INCLURE LE SCANNER
   Widget _buildInput(String label, IconData icon, TextEditingController ctrl, bool isDark, {bool isNum = false, List<String>? suggestions, bool withScan = false}) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -1474,7 +1511,8 @@ if (variants.isNotEmpty) ...[
         ),
         TextFormField(
           controller: ctrl,
-          keyboardType: isNum ? TextInputType.number : TextInputType.text,
+          // 🟢 CORRECTION : Activation des décimales sur le clavier
+          keyboardType: isNum ? const TextInputType.numberWithOptions(decimal: true) : TextInputType.text,
           style: TextStyle(color: isDark ? Colors.white : Colors.black),
           decoration: InputDecoration(
             prefixIcon: Icon(icon, color: AppColors.primary, size: 18),

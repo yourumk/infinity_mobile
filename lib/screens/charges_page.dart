@@ -1,4 +1,4 @@
-import 'dart:async';
+﻿import 'dart:async';
 import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
@@ -280,7 +280,7 @@ class _ChargesPageState extends State<ChargesPage> {
                                         FittedBox(
                                           fit: BoxFit.scaleDown,
                                           child: Text(
-                                            "-${NumberFormat.compactCurrency(locale: 'fr', symbol: 'DA', decimalDigits: 0).format(double.tryParse(item['amount']?.toString() ?? '0') ?? 0)}", 
+                                            "-${NumberFormat.compactCurrency(locale: 'fr', symbol: 'DA', decimalDigits: 2).format(double.tryParse(item['amount']?.toString() ?? '0') ?? 0)}", 
                                             style: TextStyle(
                                               fontWeight: FontWeight.w900, 
                                               color: isPending ? Colors.grey : Colors.red,

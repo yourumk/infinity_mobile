@@ -18,6 +18,8 @@ import 'package:flutter/services.dart';
 import '../core/permission_guard.dart';
 // 🛠️ FIX TRACKING PERMANENT : Import du service GPS
 import '../services/gps_service.dart';
+import '../providers/feature_provider.dart';
+import '../services/api_service.dart';
 // 🛠️ FIX SELECTOR & STATE : Import de la Pilule de sélection
 import '../widgets/warehouse_selector_pill.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -52,12 +54,37 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _isAdmin = false;
   List<String> _userPermissions = [];
 
-  // 🛠️ FIX TRACKING PERMANENT : Démarrage du GPS dès l'accueil
+  // 🛠️ FIX TRACKING PERMANENT : Démarrage du GPS conditionné par le Feature Toggling
   @override
   void initState() {
     super.initState();
     _loadRole();
-    GpsTrackingService().startTracking();
+    FeatureProvider.instance.addListener(_onFeatureUpdated);
+    // 🟢 FIX FEATURES : Synchroniser les options POS (modules activés depuis admin.html)
+    ApiService().syncCompanySettings();
+  }
+
+  @override
+  void dispose() {
+    FeatureProvider.instance.removeListener(_onFeatureUpdated);
+    super.dispose();
+  }
+
+  void _onFeatureUpdated() {
+    if (!FeatureProvider.instance.hasGpsTracking) {
+      GpsTrackingService().stopTracking();
+    } else {
+      _checkAndStartGps();
+    }
+  }
+
+  void _checkAndStartGps() {
+    bool hasGpsPerm = _isAdmin || _userPermissions.contains('mobile_map_admin') || _userPermissions.contains('mobile_tour');
+    if (FeatureProvider.instance.hasGpsTracking && hasGpsPerm) {
+      GpsTrackingService().startTracking();
+    } else {
+      GpsTrackingService().stopTracking();
+    }
   }
 
   Future<void> _loadRole() async {
@@ -68,7 +95,10 @@ class _HomeScreenState extends State<HomeScreen> {
     try {
       final List<dynamic> p = json.decode(permsString);
       perms = p.map((e) => e.toString()).toList();
-    } catch(e){}
+    } catch(e) {
+      debugPrint("Cache corrompu purgé (key: user_permissions)");
+      await prefs.remove('user_permissions');
+    }
 
     if (mounted) {
       setState(() {
@@ -78,6 +108,7 @@ class _HomeScreenState extends State<HomeScreen> {
         // Dashboard toujours visible pour tout le monde, donc on peut laisser par défaut 0
         _isLoadingRole = false;
       });
+      _checkAndStartGps();
     }
   }
 

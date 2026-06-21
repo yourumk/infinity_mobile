@@ -1,12 +1,11 @@
-import 'dart:ui';
+﻿
 import 'package:flutter/material.dart';
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'package:intl/intl.dart';
 import '../core/constants.dart';
 import '../services/api_service.dart';
 import 'client_details_page.dart';
-// 1. AJOUT DE L'IMPORT DU MODAL
-import '../widgets/print_config_modal.dart';
+
 
 class SupplierDetailsPage extends StatefulWidget {
   final Map<String, dynamic> summary;
@@ -66,53 +65,7 @@ class _SupplierDetailsPageState extends State<SupplierDetailsPage> with SingleTi
     );
   }
 
-  // 2. CORRECTION DE LA FONCTION D'IMPRESSION RAPIDE
-  Future<void> _quickPrint(BuildContext context, String format, String docType, dynamic id) async {
-    // Ouvrir le Modal d'options
-    final config = await showModalBottomSheet<Map<String, dynamic>>(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-      builder: (ctx) => PrintConfigModal(initialFormat: format),
-    );
 
-    if (config != null && context.mounted) {
-      showDialog(
-        context: context,
-        barrierDismissible: false,
-        builder: (ctx) => Dialog(
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
-          child: Padding(
-            padding: const EdgeInsets.all(20),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: const [
-                CircularProgressIndicator(),
-                SizedBox(width: 20),
-                Text("Demande au PC...", style: TextStyle(fontWeight: FontWeight.bold)),
-              ],
-            ),
-          ),
-        ),
-      );
-
-      // Appel de la nouvelle fonction magique
-      final success = await _api.printViaPC(
-        config['format'], 
-        docType, 
-        id,
-        options: config
-      );
-
-      if (context.mounted) Navigator.pop(context); // Ferme le loader
-
-      if (!success && context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text("Échec : Le PC de la boutique est-il allumé et connecté ?")),
-        );
-      }
-    }
-  }
 
   void _showPaymentModal() {
     final name = _fullData['name'] ?? 'Fournisseur';
@@ -205,7 +158,7 @@ Widget build(BuildContext context) {
                   children: [
                     const Text("Dette", style: TextStyle(color: Colors.white70, fontSize: 12)),
                     Text(
-                      NumberFormat.currency(locale: 'fr_DZ', symbol: 'DA', decimalDigits: 0).format(_currentBalance),
+                      NumberFormat.currency(locale: 'fr_DZ', symbol: 'DA', decimalDigits: 2).format(_currentBalance),
                       style: const TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.w900),
                     ),
                   ],
@@ -229,7 +182,7 @@ Widget build(BuildContext context) {
                   controller: _tabController,
                   children: [
                     ListView.builder(
-                      padding: const EdgeInsets.all(20),
+                      padding: EdgeInsets.fromLTRB(20, 20, 20, MediaQuery.of(context).padding.bottom + 100),
                       itemCount: purchases.length,
                       itemBuilder: (ctx, i) {
                         final p = purchases[i];
@@ -255,13 +208,7 @@ Widget build(BuildContext context) {
                                 decoration: BoxDecoration(color: Colors.orange.withOpacity(0.1), shape: BoxShape.circle),
                                 child: const Icon(FontAwesomeIcons.truck, color: Colors.orange, size: 18),
                             ),
-                           title: Row(
-                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                              children: [
-                                Text("Achat #${p['number'] ?? p['id']}", style: TextStyle(fontWeight: FontWeight.bold, color: isDark ? Colors.white : Colors.black)),
-                                Text("${p['total_amount'] ?? 0} DA", style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.orange)),
-                              ],
-                            ),
+                            title: Text("Achat #${p['number'] ?? p['id']}", style: TextStyle(fontWeight: FontWeight.bold, color: isDark ? Colors.white : Colors.black), maxLines: 1, overflow: TextOverflow.ellipsis),
                             subtitle: Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
@@ -270,25 +217,13 @@ Widget build(BuildContext context) {
                                   Text("Remise : -${p['global_discount']} DA", style: const TextStyle(color: Colors.green, fontSize: 12, fontWeight: FontWeight.bold)),
                               ],
                             ),
-                            trailing: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                IconButton(
-                                  icon: const Icon(FontAwesomeIcons.receipt, size: 18, color: Colors.teal),
-                                  onPressed: () => _quickPrint(context, 'Ticket', 'purchase', p['id']),
-                                ),
-                                IconButton(
-                                  icon: const Icon(FontAwesomeIcons.filePdf, size: 18, color: Colors.redAccent),
-                                  onPressed: () => _quickPrint(context, 'A4', 'purchase', p['id']),
-                                ),
-                              ],
-                            ),
+                            trailing: Text("${p['total_amount'] ?? 0} DA", style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.orange, fontSize: 14)),
                           ),
                         );
                       },
                     ),
                     ListView.builder(
-                      padding: const EdgeInsets.all(20),
+                      padding: EdgeInsets.fromLTRB(20, 20, 20, MediaQuery.of(context).padding.bottom + 100),
                       itemCount: payments.length,
                       itemBuilder: (ctx, i) {
                         final pay = payments[i];
@@ -311,17 +246,7 @@ Widget build(BuildContext context) {
                               style: TextStyle(fontWeight: FontWeight.bold, fontStyle: isLocal ? FontStyle.italic : FontStyle.normal)
                             ),
                             subtitle: Text(payDateStr),
-                            trailing: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                Text("-${pay['amount']} DA", style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.red)),
-                                const SizedBox(width: 10),
-                                IconButton(
-                                  icon: const Icon(FontAwesomeIcons.receipt, size: 18, color: Colors.orange),
-                                  onPressed: () => _quickPrint(context, 'Ticket', 'pay_supplier', pay['id']),
-                                ),
-                              ],
-                            ),
+                            trailing: Text("-${pay['amount']} DA", style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.red)),
                         );
                       },
                     ),

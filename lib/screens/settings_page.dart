@@ -1,11 +1,15 @@
 import 'package:flutter/material.dart';
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import '../core/constants.dart';
 import 'activation_page.dart';
 import 'dart:async';
 import '../services/api_service.dart';
-import '../services/update_service.dart'; // ✅ IMPORT IMPORTANT
+import '../services/update_service.dart'; 
+
+// ✅ IMPORT DE LA NOUVELLE PAGE IMPRIMANTE (Bluetooth + Réseau)
+import '../widgets/printer_settings_page.dart'; 
 
 class SettingsPage extends StatelessWidget {
   final ValueChanged<ThemeMode> onThemeModeChanged;
@@ -49,7 +53,6 @@ class SettingsPage extends StatelessWidget {
     if (confirm != true) return;
 
     final prefs = await SharedPreferences.getInstance();
-    await prefs.remove('license_key');
     await prefs.remove('is_activated');
 
     if (!context.mounted) return;
@@ -87,7 +90,7 @@ class SettingsPage extends StatelessWidget {
         padding: const EdgeInsets.all(20),
         child: Column(
           children: [
-            // SECTION APPARENCE
+         // SECTION APPARENCE
             _buildSection(context, "Apparence", [
               ListTile(
                 leading: Icon(isDark ? Icons.dark_mode : Icons.light_mode, color: Colors.blue),
@@ -102,27 +105,31 @@ class SettingsPage extends StatelessWidget {
               ),
             ], isDark),
             
-            const SizedBox(height: 20),
+            _buildTaxesSection(context, isDark),
             
-            // SECTION SYSTÈME (NOUVEAU)
+            // SECTION SYSTÈME
             _buildSection(context, "Système", [
-               // ✅ BOUTON DE MISE À JOUR MANUELLE
+               // BOUTON DE MISE À JOUR MANUELLE
                ListTile(
                 leading: const Icon(Icons.system_update, color: Colors.teal),
                 title: const Text("Mise à jour"),
                 subtitle: const Text("Vérifier la version"),
                 trailing: const Icon(Icons.refresh, color: Colors.grey),
                 onTap: () {
-                   // Appel manuel du service de mise à jour
-                   UpdateService().checkForUpdate(context);
+                   UpdateService().checkForUpdate(context, silent: false);
                 },
               ),
+              // ✅ BOUTON IMPRIMANTE TICKET (BLUETOOTH & RÉSEAU)
               ListTile(
-                leading: const Icon(Icons.print, color: Colors.purple),
-                title: const Text("Imprimante"),
+                leading: const Icon(Icons.print, color: Colors.blue),
+                title: const Text("Imprimante Ticket"),
+                subtitle: const Text("Configuration Bluetooth & LAN"),
                 trailing: const Icon(Icons.chevron_right, color: Colors.grey),
                 onTap: () { 
-                   ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Configuration Imprimante à venir...")));
+                   Navigator.push(
+                     context,
+                     MaterialPageRoute(builder: (context) => const PrinterSettingsPage()),
+                   );
                 },
               ),
               ListTile(
@@ -152,17 +159,22 @@ class SettingsPage extends StatelessWidget {
             ], isDark),
             
             const SizedBox(height: 40),
-            // Tu peux laisser ça, ou le rendre dynamique avec PackageInfo plus tard
             const Text("Infinity POS Mobile", style: TextStyle(color: Colors.grey, fontSize: 12, fontWeight: FontWeight.bold)),
             const SizedBox(height: 5),
-            const Text("v1.0.2", style: TextStyle(color: Colors.grey, fontSize: 10)),
+            FutureBuilder<PackageInfo>(
+              future: PackageInfo.fromPlatform(),
+              builder: (context, snapshot) {
+                final version = snapshot.data?.version ?? '...';
+                return Text("v$version", style: const TextStyle(color: Colors.grey, fontSize: 10));
+              },
+            ),
           ],
         ),
       ),
     );
   }
 
-  Widget _buildSection(BuildContext context, String title, List<Widget> children, bool isDark) {
+Widget _buildSection(BuildContext context, String title, List<Widget> children, bool isDark) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -190,7 +202,55 @@ class SettingsPage extends StatelessWidget {
             }).toList(),
           ),
         ),
+        const SizedBox(height: 20),
       ],
+    );
+  }
+
+Widget _buildTaxesSection(BuildContext context, bool isDark) {
+    return FutureBuilder<SharedPreferences>(
+      future: SharedPreferences.getInstance(),
+      builder: (context, snapshot) {
+        if (!snapshot.hasData) return const SizedBox.shrink();
+        final prefs = snapshot.data!;
+        
+        return StatefulBuilder(
+          builder: (context, setState) {
+            // 👉 PAR DÉFAUT : FALSE (Désactivé)
+            bool enableTva = prefs.getBool('enable_tva') ?? false;
+            bool enableTimbre = prefs.getBool('enable_timbre') ?? false;
+
+            return _buildSection(
+              context, 
+              "Taxes & Fiscalité", 
+              [
+                SwitchListTile(
+                  title: const Text("Activer la TVA"),
+                  subtitle: const Text("Calcul automatique de la TVA"),
+                  value: enableTva,
+                  activeColor: AppColors.primary,
+                  onChanged: (val) async {
+                    await prefs.setBool('enable_tva', val);
+                    setState(() => enableTva = val);
+                  },
+                ),
+                Divider(height: 1, indent: 50, color: Colors.grey.withOpacity(0.2)),
+                SwitchListTile(
+                  title: const Text("Activer le Timbre Fiscal"),
+                  subtitle: const Text("Calcul automatique (1%, 1.5%, 2%)"),
+                  value: enableTimbre,
+                  activeColor: AppColors.primary,
+                  onChanged: (val) async {
+                    await prefs.setBool('enable_timbre', val);
+                    setState(() => enableTimbre = val);
+                  },
+                ),
+              ], 
+              isDark
+            );
+          }
+        );
+      }
     );
   }
 }

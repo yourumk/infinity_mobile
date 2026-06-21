@@ -16,10 +16,10 @@ void main() async {
 
   // 2. AMÉLIORATION UI : Rendre la barre de statut transparente (Moderne)
   SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
-    statusBarColor: Colors.transparent,
-    statusBarIconBrightness: Brightness.light, // 🟢 Icônes blanches pour thème sombre
-    systemNavigationBarColor: Colors.transparent,
-    systemNavigationBarIconBrightness: Brightness.light,
+    statusBarColor: Colors.transparent, // Barre transparente
+    statusBarIconBrightness: Brightness.dark, // Icônes sombres par défaut
+    systemNavigationBarColor: Colors.transparent, // Barre de nav transparente (Android 10+)
+    systemNavigationBarIconBrightness: Brightness.dark,
   ));
   SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge); // 📱 Full Screen Immersion
   

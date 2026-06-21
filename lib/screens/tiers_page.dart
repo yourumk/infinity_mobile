@@ -308,7 +308,7 @@ class _TiersPageState extends State<TiersPage> {
                       ),
                     )
                   : ListView.builder(
-                    padding: const EdgeInsets.fromLTRB(20, 0, 20, 20), 
+                    padding: EdgeInsets.fromLTRB(20, 0, 20, MediaQuery.of(context).padding.bottom + 100), 
                     itemCount: _filteredList.length,
                     physics: const BouncingScrollPhysics(),
                     itemBuilder: (ctx, i) {
@@ -352,7 +352,7 @@ class _TiersPageState extends State<TiersPage> {
                             crossAxisAlignment: CrossAxisAlignment.end,
                             children: [
                               Text(
-                                NumberFormat.currency(locale: 'fr_DZ', symbol: 'DA', decimalDigits: 0).format(balance),
+                                NumberFormat.currency(locale: 'fr_DZ', symbol: 'DA', decimalDigits: 2).format(balance),
                                 style: TextStyle(
                                   fontWeight: FontWeight.bold, 
                                   color: isDebt ? Colors.redAccent : Colors.green, 
@@ -438,7 +438,7 @@ class _AddTierModalState extends State<AddTierModal> {
     return Padding(
       padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
       child: Container(
-        padding: const EdgeInsets.all(25),
+        padding: EdgeInsets.fromLTRB(25, 25, 25, MediaQuery.of(context).padding.bottom + 25), // 🛠️ MODULE 1 : Padding dynamique Android
         decoration: BoxDecoration(
           color: isDark ? const Color(0xFF1E1E2C) : Colors.white,
           borderRadius: const BorderRadius.vertical(top: Radius.circular(30)),

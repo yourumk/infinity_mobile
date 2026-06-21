@@ -17,21 +17,24 @@ import '../services/gps_service.dart';
 import 'package:flutter/services.dart';
 
 import 'offline_queue_page.dart';
-import '../widgets/print_config_modal.dart';
+
 import '../widgets/spotlight_search.dart';
 import '../pages/infinity_studio_page.dart';
 import 'fleet_tour_page.dart';
 import 'tour_stops_page.dart';
 import 'transfers_page.dart';
+import 'dashboard_components.dart'; // 🟢 FIX : Import des composants constants
 import 'fleet_map_page.dart';
 import 'cash_manager_page.dart';
 import '../core/permission_guard.dart';
+import 'activation_page.dart'; // 🟢 Pour la redirection expulsion
+import 'app_locked_page.dart'; // 🟢 Pour le cadenas rouge
 // 🛠️ FIX UI/STATE : Import de la Pilule de sélection sécurisée
 import '../widgets/warehouse_selector_pill.dart';
 
 // â”€â”€ Top-level helpers (accessible by all classes in this file) â”€â”€
 double _safeDoubleGlobal(dynamic val) => double.tryParse(val?.toString() ?? '0') ?? 0.0;
-String fmtMoney(dynamic amount) => NumberFormat.currency(locale: 'fr_DZ', symbol: 'DA', decimalDigits: 0).format(_safeDoubleGlobal(amount));
+String fmtMoney(dynamic amount) => NumberFormat.currency(locale: 'fr_DZ', symbol: 'DA', decimalDigits: 2).format(_safeDoubleGlobal(amount));
 
 class DashboardPage extends StatefulWidget {
   final Function(int) onNavigateToTab; 
@@ -70,29 +73,31 @@ class _DashboardPageState extends State<DashboardPage> {
   // 🛠️ FIX RBAC & DASHBOARD : Vérification de permission (identique à home_screen.dart)
   bool _hasPerm(String perm) => _userRole == 'admin' || _userPermissions.contains(perm);
 
+  DataProvider? _dataProvider;
+
   @override
   void initState() {
     super.initState();
-    ApiService().startAutoSync();
     _loadPermissions();
-    
     
     // 🔐 Lancement du GPS Tracking
     GpsTrackingService().startTracking();
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      final provider = Provider.of<DataProvider>(context, listen: false);
-      provider.startAutoRefresh();
-      provider.addListener(_onProviderUpdate);
+      if (mounted) {
+        _dataProvider = Provider.of<DataProvider>(context, listen: false);
+        _dataProvider?.startAutoRefresh();
+        _dataProvider?.addListener(_onProviderUpdate);
+      }
       Future.delayed(const Duration(seconds: 3), () {
-        UpdateService().checkForUpdate(context);
+        if (mounted) UpdateService().checkForUpdate(context);
       });
     });
   }
 
   @override
   void dispose() {
-    try { Provider.of<DataProvider>(context, listen: false).removeListener(_onProviderUpdate); } catch(e) {}
+    _dataProvider?.removeListener(_onProviderUpdate);
     _pageController.dispose();
     _chartController.dispose();
     super.dispose();
@@ -100,8 +105,16 @@ class _DashboardPageState extends State<DashboardPage> {
 
   void _onProviderUpdate() {
     if (!mounted) return;
-    if (!Provider.of<DataProvider>(context, listen: false).isLoading) {
-       _loadTabsData();
+    
+    final provider = _dataProvider;
+    if (provider != null && !provider.isLoading) {
+      final currentSalesCount = provider.dashboardData.salesCount as int? ?? 0;
+      final oldSalesCount = _rawKpi.isNotEmpty ? _safeInt((_rawKpi['dashboard'] ?? _rawKpi)['sales_count']) : -1;
+      
+      if (currentSalesCount != oldSalesCount) {
+        // Run _loadTabsData asynchronously without blocking build
+        Future.microtask(() => _loadTabsData());
+      }
     }
   }
 
@@ -147,22 +160,38 @@ class _DashboardPageState extends State<DashboardPage> {
     try {
       final data = await _api.fetchDashboardData();
       if (mounted) {
-        setState(() {
-          _rawKpi = data;
-          final tables = data['tables'];
-          if (tables is Map) {
-            _financeData = _safeList(tables['finance']);
-            _topProducts = _safeList(tables['top_products']);
-            _recentPurchases = _safeList(tables['purchases']);
-            if (tables['sleeping_stock'] != null) {
-                 _sleepingStock = _safeList(tables['sleeping_stock']);
-            } else if (tables['charges'] != null && (tables['charges'] as List).isNotEmpty) {
-                 _sleepingStock = _safeList(tables['charges']); 
-            }
-          }
-        });
+        // 🟢 FIX CRITIQUE : On empêche l'écran de clignoter à zéro si les données sont vides
+        if (data != null && data is Map<String, dynamic> && data.containsKey('sales_today')) {
+            setState(() {
+              _rawKpi = data;
+              final tables = data['tables'];
+              
+              if (tables != null && tables is Map) {
+                _financeData = _safeList(tables['finance']);
+                _topProducts = _safeList(tables['top_products']);
+                _recentPurchases = _safeList(tables['purchases']);
+                if (tables['sleeping_stock'] != null) {
+                     _sleepingStock = _safeList(tables['sleeping_stock']);
+                } else if (tables['charges'] != null && (tables['charges'] as List).isNotEmpty) {
+                     _sleepingStock = _safeList(tables['charges']); 
+                }
+              }
+            });
+        }
       }
-    } catch (e) {}
+    } catch (e) {
+      // 🔒 NOUVEAU : Si verrouillé, on affiche l'écran rouge de cadenas
+      if (e.toString().contains('AUTH_LOCKED')) {
+        _showLockScreen();
+        return;
+      }
+      // 🟢 EXPULSION EN DIRECT : Le compte a été touché par l'admin !
+      if (e.toString().contains('AUTH_INVALID')) {
+        _forceLogout();
+        return;
+      }
+      debugPrint("❌ Erreur _loadTabsData : $e");
+    }
   }
 
   void _navTo(int index) => widget.onNavigateToTab(index);
@@ -194,413 +223,341 @@ class _DashboardPageState extends State<DashboardPage> {
   @override
   Widget build(BuildContext context) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
-    final dataProvider = Provider.of<DataProvider>(context);
-    final dynamic kpi = _rawKpi.isNotEmpty ? _rawKpi : dataProvider.dashboardData; 
-    final isLoading = dataProvider.isLoading;
     
-    final double salesToday = kpi is Map ? _safeDouble(kpi['sales_today']) : (kpi.salesToday as double? ?? 0.0);
-    final double profitToday = kpi is Map ? _safeDouble(kpi['profit_today']) : (kpi.profitToday as double? ?? 0.0);
-    final double treasury = kpi is Map ? _safeDouble(kpi['treasury']) : (kpi.treasury as double? ?? 0.0);
-    final double capital = kpi is Map ? _safeDouble(kpi['capital']) : (kpi.capital as double? ?? 0.0);
-    final double stockValue = kpi is Map ? _safeDouble(kpi['stock_value']) : (kpi.stockValue as double? ?? 0.0);
-    final double clientCredit = kpi is Map ? _safeDouble(kpi['client_credit']) : (kpi.clientCredit as double? ?? 0.0);
-    final double supplierDebt = kpi is Map ? _safeDouble(kpi['supplier_debt']) : (kpi.supplierDebt as double? ?? 0.0);
-    
-    final int alertsLow = kpi is Map ? _safeInt(kpi['alerts_low']) : (kpi.alertsLow as int? ?? 0);
-    final int alertsExpiry = kpi is Map ? _safeInt(kpi['alerts_expiry']) : (kpi.alertsExpiry as int? ?? 0);
-    final int totalAlerts = alertsLow + alertsExpiry;
-    final int salesCount = kpi is Map ? _safeInt(kpi['sales_count']) : (kpi.salesCount as int? ?? 0);
-
-    final List<SalesTrendModel> cleanData = dataProvider.salesTrend.isNotEmpty ? dataProvider.salesTrend : [SalesTrendModel(label: 'N/A', value: 0)];
-
-    // Dynamic greeting
-    final hour = DateTime.now().hour;
-    final greeting = hour < 12 ? 'Bonjour' : hour < 18 ? 'Bon après-midi' : 'Bonsoir';
-    final dateStr = DateFormat('EEEE d MMMM', 'fr').format(DateTime.now());
+    // 🟢 FIX : On écoute les alertes via un Selector pour éviter un rebuild global
+    final totalAlerts = context.select<DataProvider, int>((p) {
+        final k = p.dashboardData;
+        return (k.alertsLow as int? ?? 0) + (k.alertsExpiry as int? ?? 0);
+    });
 
     return Scaffold(
       extendBody: true,
       extendBodyBehindAppBar: true,
       backgroundColor: isDark ? const Color(0xFF0F0F13) : const Color(0xFFF2F4F8),
-      body: isLoading && salesCount == 0
-          ? const Center(child: CircularProgressIndicator(color: AppColors.accent))
-          : RefreshIndicator(
-              onRefresh: () async {
-                await dataProvider.loadData(forceRefresh: true);
-                await _loadTabsData();
-              },
-              child: SafeArea(
-                bottom: false,
-                child: SingleChildScrollView(
-                  physics: const AlwaysScrollableScrollPhysics(parent: BouncingScrollPhysics()),
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 24),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        const SizedBox(height: 24),
+      body: RefreshIndicator(
+        onRefresh: () async {
+          await Provider.of<DataProvider>(context, listen: false).loadData(forceRefresh: true);
+          await _loadTabsData();
+        },
+        child: SafeArea(
+          bottom: false,
+          child: SingleChildScrollView(
+            physics: const AlwaysScrollableScrollPhysics(parent: BouncingScrollPhysics()),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 24),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const SizedBox(height: 24),
 
-                      // ════════════════ ERROR BANNER ════════════════
-                      if (_api.lastError != null) ...[
-                        GestureDetector(
-                          onTap: () async {
-                            _api.clearError();
-                            await dataProvider.loadData(forceRefresh: true);
-                            await _loadTabsData();
-                          },
-                          child: Container(
-                            padding: const EdgeInsets.all(14),
-                            margin: const EdgeInsets.only(bottom: 20),
-                            decoration: BoxDecoration(
-                              color: Colors.red.withOpacity(0.08),
-                              borderRadius: BorderRadius.circular(16),
-                              border: Border.all(color: Colors.red.withOpacity(0.2)),
-                            ),
-                            child: Row(
-                              children: [
-                                const Icon(Icons.wifi_off_rounded, color: Colors.red, size: 20),
-                                const SizedBox(width: 12),
-                                Expanded(
-                                  child: Text(
-                                    _api.lastError!,
-                                    style: const TextStyle(color: Colors.red, fontSize: 12, fontWeight: FontWeight.w600),
-                                    maxLines: 2, overflow: TextOverflow.ellipsis,
-                                  ),
-                                ),
-                                const SizedBox(width: 8),
-                                Container(
-                                  padding: const EdgeInsets.all(4),
-                                  decoration: BoxDecoration(color: Colors.red.withOpacity(0.1), shape: BoxShape.circle),
-                                  child: const Icon(Icons.refresh_rounded, color: Colors.red, size: 16),
-                                ),
-                              ],
-                            ),
-                          ),
+                  if (_api.lastError != null) ...[
+                    GestureDetector(
+                      onTap: () async {
+                        _api.clearError();
+                        await Provider.of<DataProvider>(context, listen: false).loadData(forceRefresh: true);
+                        await _loadTabsData();
+                      },
+                      child: Container(
+                        padding: const EdgeInsets.all(14),
+                        margin: const EdgeInsets.only(bottom: 20),
+                        decoration: BoxDecoration(
+                          color: Colors.red.withOpacity(0.08),
+                          borderRadius: BorderRadius.circular(16),
+                          border: Border.all(color: Colors.red.withOpacity(0.2)),
                         ),
-                      ],
-
-                      // ════════════════ HEADER ════════════════
-                      Row(
-                        crossAxisAlignment: CrossAxisAlignment.center,
-                        children: [
-                          Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  greeting,
-                                  style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: isDark ? Colors.white60 : Colors.grey.shade500),
-                                ),
-                                const SizedBox(height: 2),
-                                FittedBox(
-                                  fit: BoxFit.scaleDown,
-                                  alignment: Alignment.centerLeft,
-                                  child: Text(
-                                    "Tableau de Bord",
-                                    style: TextStyle(fontSize: 28, fontWeight: FontWeight.w900, color: isDark ? Colors.white : const Color(0xFF1A1A2E), letterSpacing: -0.5),
-                                  ),
-                                ),
-                                const SizedBox(height: 2),
-                                Row(
-                                  children: [
-                                    Flexible(
-                                      child: Text(
-                                        dateStr,
-                                        style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500, color: isDark ? Colors.white38 : Colors.grey.shade400),
-                                        overflow: TextOverflow.ellipsis,
-                                      ),
-                                    ),
-                                    Text(
-                                      " • ",
-                                      style: TextStyle(fontSize: 12, color: isDark ? Colors.white38 : Colors.grey.shade400),
-                                    ),
-                                    const Flexible(child: WarehouseSelectorPill()),
-                                  ],
-                                ),
-                              ],
-                            ),
-                          ),
-                          const SizedBox(width: 16),
-                          Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              _buildHeaderBtn(FontAwesomeIcons.magnifyingGlass, isDark, _openSpotlight),
-                              const SizedBox(width: 10),
-                              StreamBuilder<void>(
-                                stream: ApiService().onDataUpdated,
-                                builder: (context, snapshot) {
-                                  final queueCount = ApiService().currentQueue.length;
-                                  final hasPending = queueCount > 0;
-                                  return GestureDetector(
-                                    onTap: () => Navigator.push(context, MaterialPageRoute(builder: (context) => OfflineQueuePage())),
-                                    child: Container(
-                                      padding: const EdgeInsets.all(11),
-                                      decoration: BoxDecoration(
-                                        color: isDark ? Colors.white.withOpacity(0.06) : Colors.white.withOpacity(0.8),
-                                        shape: BoxShape.circle,
-                                        border: Border.all(
-                                          color: hasPending ? Colors.orange.withOpacity(0.6) : (isDark ? Colors.white.withOpacity(0.08) : Colors.grey.shade200),
-                                          width: hasPending ? 1.5 : 0.5,
-                                        ),
-                                      ),
-                                      child: Stack(
-                                        clipBehavior: Clip.none,
-                                        children: [
-                                          Icon(hasPending ? FontAwesomeIcons.cloudArrowUp : FontAwesomeIcons.cloud, color: hasPending ? Colors.orange : (isDark ? Colors.white70 : Colors.grey.shade600), size: 17),
-                                          if (hasPending)
-                                            Positioned(right: -6, top: -6, child: Container(padding: const EdgeInsets.all(3.5), decoration: const BoxDecoration(color: Colors.red, shape: BoxShape.circle), child: Text('$queueCount', style: const TextStyle(fontSize: 8, color: Colors.white, fontWeight: FontWeight.bold))))
-                                        ],
-                                      ),
-                                    ),
-                                  );
-                                }
+                        child: Row(
+                          children: [
+                            const Icon(Icons.wifi_off_rounded, color: Colors.red, size: 20),
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: Text(
+                                _api.lastError!,
+                                style: const TextStyle(color: Colors.red, fontSize: 12, fontWeight: FontWeight.w600),
+                                maxLines: 2, overflow: TextOverflow.ellipsis,
                               ),
-                              const SizedBox(width: 10),
-                              _buildHeaderBtn(Icons.settings_rounded, isDark, () => widget.onOpenSettings()),
-                            ],
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 28),
-
-                    // ═══════════════════════════════ TOOL GRID ═══════════════════════════════
-                      GridView.count(
-                        shrinkWrap: true,
-                        physics: const NeverScrollableScrollPhysics(),
-                        crossAxisCount: MediaQuery.of(context).size.width > 600 ? 6 : 4,
-                        mainAxisSpacing: 20,
-                        crossAxisSpacing: 14,
-                        childAspectRatio: MediaQuery.of(context).size.width > 600 ? 1.0 : 0.95,
-                        children: [
-                          RequirePermission(permission: 'mobile_sales', child: _buildToolItem(FontAwesomeIcons.vault, "Multi-Caisse", const Color(0xFF0EA5E9), isDark, () => Navigator.push(context, MaterialPageRoute(builder: (_) => const CashManagerPage()))), fallback: _buildLockedToolItem(FontAwesomeIcons.vault, "Multi-Caisse", isDark)),
-                          RequirePermission(permission: 'mobile_history_sales', child: _buildToolItem(FontAwesomeIcons.receipt, "Hist. Ventes", const Color(0xFF8B5CF6), isDark, () => _navTo(5)), fallback: _buildLockedToolItem(FontAwesomeIcons.receipt, "Hist. Ventes", isDark)),
-                          RequirePermission(permission: 'mobile_clients', child: _buildToolItem(FontAwesomeIcons.users, "Clients", const Color(0xFF3B82F6), isDark, () => _navTo(6)), fallback: _buildLockedToolItem(FontAwesomeIcons.users, "Clients", isDark)),
-                          RequirePermission(permission: 'mobile_history_purchases', child: _buildToolItem(FontAwesomeIcons.cartFlatbed, "Hist. Achats", const Color(0xFFF97316), isDark, () => _navTo(11)), fallback: _buildLockedToolItem(FontAwesomeIcons.cartFlatbed, "Hist. Achats", isDark)),
-                          RequirePermission(permission: 'mobile_suppliers', child: _buildToolItem(FontAwesomeIcons.truckField, "Fournisseurs", const Color(0xFF06B6D4), isDark, () => _navTo(12)), fallback: _buildLockedToolItem(FontAwesomeIcons.truckField, "Fournisseurs", isDark)),
-                          RequirePermission(permission: 'mobile_catalog', child: _buildToolItem(FontAwesomeIcons.boxOpen, "Pertes", const Color(0xFFEF4444), isDark, () => _navTo(9)), fallback: _buildLockedToolItem(FontAwesomeIcons.boxOpen, "Pertes", isDark)),
-                          RequirePermission(permission: 'mobile_reports', child: _buildToolItem(FontAwesomeIcons.bellConcierge, "Alertes", const Color(0xFFF59E0B), isDark, () => _navTo(8), badge: totalAlerts > 0 ? totalAlerts : null), fallback: _buildLockedToolItem(FontAwesomeIcons.bellConcierge, "Alertes", isDark)),
-                          RequirePermission(permission: 'mobile_catalog', child: _buildToolItem(FontAwesomeIcons.print, "Print Studio", const Color(0xFF14B8A6), isDark, () => _navTo(10)), fallback: _buildLockedToolItem(FontAwesomeIcons.print, "Print Studio", isDark)),
-                          RequirePermission(permission: 'mobile_tour', child: _buildToolItem(FontAwesomeIcons.truck, "Ma Tournée", const Color(0xFFF97316), isDark, () => Navigator.push(context, MaterialPageRoute(builder: (_) => const FleetTourPage()))), fallback: _buildLockedToolItem(FontAwesomeIcons.truck, "Ma Tournée", isDark)),
-                          RequirePermission(permission: 'mobile_transfers', child: _buildToolItem(FontAwesomeIcons.boxesStacked, "Transferts", const Color(0xFF64748B), isDark, () => Navigator.push(context, MaterialPageRoute(builder: (_) => const TransfersPage()))), fallback: _buildLockedToolItem(FontAwesomeIcons.boxesStacked, "Transferts", isDark)),
-                          // 🛠️ FIX RBAC & DASHBOARD : Live Tracking masqué complètement si pas de permission
-                          if (_hasPerm('mobile_map_admin'))
-                            _buildToolItem(FontAwesomeIcons.mapLocationDot, "Live Tracking", const Color(0xFF22C55E), isDark, () => Navigator.push(context, MaterialPageRoute(builder: (_) => const FleetMapPage()))),
-                          // 🗺️ VMS : Bouton Programme de Visite
-                          RequirePermission(permission: 'mobile_tour', child: _buildToolItem(FontAwesomeIcons.route, "Programme", const Color(0xFF6F2DBD), isDark, () => Navigator.push(context, MaterialPageRoute(builder: (_) => TourStopsPage(onBack: () => Navigator.pop(context))))), fallback: _buildLockedToolItem(FontAwesomeIcons.route, "Programme", isDark)),
-                        ],
-                      ),
-                      const SizedBox(height: 28),
-
-                      _buildCompactSalesToday(isDark, salesToday, salesCount, profitToday, totalAlerts, treasury),
-                      const SizedBox(height: 24),
-
-                      // ─── Vue Admin/Manager : Dashboard complet ───────────────────
-                      if (_hasDashboardPerm && _canViewProfit) ...[ 
-                        _buildFusedChartAndFinance(
-                          isDark, cleanData, salesToday, profitToday,
-                          treasury, capital, stockValue, clientCredit, supplierDebt,
-                        ),
-                        const SizedBox(height: 8),
-                        // Chart dots
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: List.generate(3, (index) => AnimatedContainer(
-                            duration: const Duration(milliseconds: 300),
-                            margin: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
-                            width: _currentChartIndex == index ? 20 : 7,
-                            height: 7,
-                            decoration: BoxDecoration(
-                              borderRadius: BorderRadius.circular(4),
-                              color: _currentChartIndex == index ? AppColors.accent : (isDark ? Colors.white.withOpacity(0.15) : Colors.grey.withOpacity(0.25)),
                             ),
-                          )),
-                        ),
-                        const SizedBox(height: 24),
-                        _buildProfitBanner(isDark, profitToday),
-                        const SizedBox(height: 20),
-                        Row(
-                          children: [
-                            Expanded(child: _buildDetailStatCard("Capital Total", fmtMoney(capital), const Color(0xFFF59E0B), FontAwesomeIcons.coins, isDark, () {})),
-                            const SizedBox(width: 14),
-                            Expanded(child: _buildDetailStatCard("Valeur Stock", fmtMoney(stockValue), const Color(0xFFF97316), FontAwesomeIcons.boxesStacked, isDark, () => _openDetailList('STOCK_VALUE', 'Top Valeur Stock', Colors.orange))),
-                          ],
-                        ),
-                        const SizedBox(height: 28),
-                        // Tabs complets (Journal / Top / Achats / Dormant)
-                        Column(
-                          children: [
+                            const SizedBox(width: 8),
                             Container(
-                              height: 52, padding: const EdgeInsets.all(4),
-                              decoration: BoxDecoration(
-                                color: isDark ? Colors.white.withOpacity(0.05) : Colors.white.withOpacity(0.7),
-                                borderRadius: BorderRadius.circular(16),
-                                border: Border.all(color: isDark ? Colors.white.withOpacity(0.06) : Colors.grey.shade200, width: 0.5),
-                              ),
-                              child: Row(
-                                children: [
-                                  _buildSegment("Journal", 0, isDark),
-                                  _buildSegment("Top Ventes", 1, isDark),
-                                  _buildSegment("Achats", 2, isDark),
-                                  _buildSegment("Dormant", 3, isDark),
-                                ],
-                              ),
+                              padding: const EdgeInsets.all(4),
+                              decoration: BoxDecoration(color: Colors.red.withOpacity(0.1), shape: BoxShape.circle),
+                              child: const Icon(Icons.refresh_rounded, color: Colors.red, size: 16),
                             ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ],
+
+                  // 🟢 FIX : Utilisation du composant Header constant
+                  DashboardHeader(
+                    isDark: isDark,
+                    onNavigateToTab: _navTo,
+                    onOpenSettings: widget.onOpenSettings,
+                  ),
+                  const SizedBox(height: 28),
+
+                  // 🟢 FIX : Utilisation du composant de Grille constant
+                  DashboardToolGrid(
+                    isDark: isDark,
+                    onNavigateToTab: _navTo,
+                    totalAlerts: totalAlerts,
+                    hasPerm: _hasPerm,
+                  ),
+                  const SizedBox(height: 12),
+
+                  // 🟢 FIX : On utilise Consumer uniquement pour les statistiques
+                  Consumer<DataProvider>(
+                    builder: (context, provider, child) {
+                      // 🟢 FIX FLASH : Pour vendeur/chauffeur, TOUJOURS utiliser _rawKpi (données personnelles)
+                      // Ne JAMAIS utiliser provider.dashboardData car il contient les chiffres globaux du cache
+                      final bool isRestrictedRole = !_canViewProfit; // vendeur ou chauffeur
+                      final dynamic kpi;
+                      if (isRestrictedRole) {
+                        // Rôle restreint → uniquement les données personnelles de _loadTabsData()
+                        kpi = _rawKpi.isNotEmpty ? (_rawKpi['dashboard'] ?? _rawKpi) : null;
+                      } else {
+                        // Admin/Manager → peut utiliser les données du Provider comme fallback
+                        kpi = _rawKpi.isNotEmpty ? (_rawKpi['dashboard'] ?? _rawKpi) : provider.dashboardData;
+                      }
+                      final isLoading = provider.isLoading;
+                      
+                      // 🟢 FIX FLASH : Si rôle restreint et pas encore de données personnelles → skeleton
+                      if (kpi == null || (isLoading && _rawKpi.isEmpty && _api.lastError == null)) {
+                        return const Padding(
+                          padding: EdgeInsets.symmetric(vertical: 20),
+                          child: Center(child: CircularProgressIndicator(color: AppColors.accent)),
+                        );
+                      }
+
+                      final double salesToday = kpi is Map ? _safeDouble(kpi['sales_today']) : _safeDouble(kpi?.salesToday);
+                      final double profitToday = kpi is Map ? _safeDouble(kpi['profit_today']) : _safeDouble(kpi?.profitToday);
+                      final double treasury = kpi is Map ? _safeDouble(kpi['treasury']) : _safeDouble(kpi?.treasury);
+                      final double capital = kpi is Map ? _safeDouble(kpi['capital']) : _safeDouble(kpi?.capital);
+                      final double stockValue = kpi is Map ? _safeDouble(kpi['stock_value']) : _safeDouble(kpi?.stockValue);
+                      final double clientCredit = kpi is Map ? _safeDouble(kpi['client_credit']) : _safeDouble(kpi?.clientCredit);
+                      final double supplierDebt = kpi is Map ? _safeDouble(kpi['supplier_debt']) : _safeDouble(kpi?.supplierDebt);
+                      
+                      final int salesCount = kpi is Map ? _safeInt(kpi['sales_count']) : _safeInt(kpi?.salesCount);
+
+                      final List<SalesTrendModel> cleanData = provider.salesTrend.isNotEmpty ? provider.salesTrend : [SalesTrendModel(label: 'N/A', value: 0)];
+
+                      return Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          _buildCompactSalesToday(isDark, salesToday, salesCount, profitToday, totalAlerts, treasury),
+                          const SizedBox(height: 24),
+
+                          // ─── Vue Admin/Manager : Dashboard complet ───────────────────
+                          if (_hasDashboardPerm && _canViewProfit) ...[ 
+                            _buildFusedChartAndFinance(
+                              isDark, cleanData, salesToday, profitToday,
+                              treasury, capital, stockValue, clientCredit, supplierDebt,
+                            ),
+                            const SizedBox(height: 8),
+                            // Chart dots
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: List.generate(3, (index) => AnimatedContainer(
+                                duration: const Duration(milliseconds: 300),
+                                margin: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+                                width: _currentChartIndex == index ? 20 : 7,
+                                height: 7,
+                                decoration: BoxDecoration(
+                                  borderRadius: BorderRadius.circular(4),
+                                  color: _currentChartIndex == index ? AppColors.accent : (isDark ? Colors.white.withOpacity(0.15) : Colors.grey.withOpacity(0.25)),
+                                ),
+                              )),
+                            ),
+                            const SizedBox(height: 24),
+                            _buildProfitBanner(isDark, profitToday),
                             const SizedBox(height: 20),
-                            SizedBox(
-                              height: 400,
-                              child: PageView(
-                                controller: _pageController,
-                                onPageChanged: (index) => setState(() => _currentTabIndex = index),
-                                children: [
-                                  _buildFinanceList(isDark),
-                                  _buildTopProductsList(isDark),
-                                  _buildPurchasesList(isDark),
-                                  _buildSleepingStockList(isDark),
-                                ],
-                              ),
+                            Row(
+                              children: [
+                                Expanded(child: _buildDetailStatCard("Capital Total", fmtMoney(capital), const Color(0xFFF59E0B), FontAwesomeIcons.coins, isDark, () {})),
+                                const SizedBox(width: 14),
+                                Expanded(child: _buildDetailStatCard("Valeur Stock", fmtMoney(stockValue), const Color(0xFFF97316), FontAwesomeIcons.boxesStacked, isDark, () => _openDetailList('STOCK_VALUE', 'Top Valeur Stock', Colors.orange))),
+                              ],
                             ),
-                          ],
-                        ),
-
-                      // ─── Vue Chauffeur / Vendeur : Dashboard Personnel ───────────
-                      ] else if (_hasDashboardPerm && !_canViewProfit) ...[
-                        // 🟢 FIX DASHBOARD : 2 KPIs héros mis en avant (Mon CA + Mes Ventes)
-                        Row(
-                          children: [
-                            Expanded(
-                              child: GlassCard(
-                                isDark: isDark,
-                                padding: const EdgeInsets.all(18),
-                                borderRadius: 20,
-                                borderColor: AppColors.success.withOpacity(0.3),
-                                child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    Container(
-                                      padding: const EdgeInsets.all(8),
-                                      decoration: BoxDecoration(color: AppColors.success.withOpacity(0.12), borderRadius: BorderRadius.circular(10)),
-                                      child: const Icon(FontAwesomeIcons.chartLine, color: AppColors.success, size: 16),
-                                    ),
-                                    const SizedBox(height: 12),
-                                    FittedBox(
-                                      fit: BoxFit.scaleDown,
-                                      alignment: Alignment.centerLeft,
-                                      child: Text(fmtMoney(salesToday), style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w900, color: AppColors.success)),
-                                    ),
-                                    const SizedBox(height: 4),
-                                    Text("Mon CA du Jour", style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: isDark ? Colors.white54 : Colors.grey.shade600)),
-                                  ],
-                                ),
-                              ),
-                            ),
-                            const SizedBox(width: 14),
-                            Expanded(
-                              child: GlassCard(
-                                isDark: isDark,
-                                padding: const EdgeInsets.all(18),
-                                borderRadius: 20,
-                                borderColor: AppColors.primary.withOpacity(0.3),
-                                child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    Container(
-                                      padding: const EdgeInsets.all(8),
-                                      decoration: BoxDecoration(color: AppColors.primary.withOpacity(0.12), borderRadius: BorderRadius.circular(10)),
-                                      child: const Icon(FontAwesomeIcons.receipt, color: AppColors.primary, size: 16),
-                                    ),
-                                    const SizedBox(height: 12),
-                                    Text(
-                                      '$salesCount',
-                                      style: const TextStyle(fontSize: 32, fontWeight: FontWeight.w900, color: AppColors.primary),
-                                    ),
-                                    const SizedBox(height: 4),
-                                    Text("Mes Ventes", style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: isDark ? Colors.white54 : Colors.grey.shade600)),
-                                  ],
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 24),
-
-                        // 🛠️ NOUVEAU : Journal des ventes récentes pour vendeur/chauffeur
-                        GlassCard(
-                          isDark: isDark,
-                          padding: const EdgeInsets.all(0),
-                          borderRadius: 20,
-                          child: Column(
-                            children: [
-                              Padding(
-                                padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
-                                child: Row(
-                                  children: [
-                                    Container(
-                                      padding: const EdgeInsets.all(8),
-                                      decoration: BoxDecoration(color: AppColors.primary.withOpacity(0.12), borderRadius: BorderRadius.circular(10)),
-                                      child: const Icon(FontAwesomeIcons.clockRotateLeft, color: AppColors.primary, size: 16),
-                                    ),
-                                    const SizedBox(width: 10),
-                                    Text("Dernières Ventes", style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800, color: isDark ? Colors.white : Colors.black)),
-                                    const Spacer(),
-                                    Container(
-                                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                                      decoration: BoxDecoration(color: AppColors.primary.withOpacity(0.1), borderRadius: BorderRadius.circular(8)),
-                                      child: Text("${_financeData.length}", style: const TextStyle(color: AppColors.primary, fontWeight: FontWeight.w900, fontSize: 13)),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                              // Chips de filtrage quantité
-                              Padding(
-                                padding: const EdgeInsets.symmetric(horizontal: 16),
-                                child: SingleChildScrollView(
-                                  scrollDirection: Axis.horizontal,
+                            const SizedBox(height: 28),
+                            // Tabs complets (Journal / Top / Achats / Dormant)
+                            Column(
+                              children: [
+                                Container(
+                                  height: 52, padding: const EdgeInsets.all(4),
+                                  decoration: BoxDecoration(
+                                    color: isDark ? Colors.white.withOpacity(0.05) : Colors.white.withOpacity(0.7),
+                                    borderRadius: BorderRadius.circular(16),
+                                    border: Border.all(color: isDark ? Colors.white.withOpacity(0.06) : Colors.grey.shade200, width: 0.5),
+                                  ),
                                   child: Row(
-                                    children: [10, 50, 100, 0].map((n) {
-                                      final label = n == 0 ? 'Tout' : '$n';
-                                      final isSelected = _sellerSalesLimit == n;
-                                      return Padding(
-                                        padding: const EdgeInsets.only(right: 6),
-                                        child: ChoiceChip(
-                                          label: Text(label),
-                                          selected: isSelected,
-                                          onSelected: (_) => setState(() => _sellerSalesLimit = n),
-                                          selectedColor: AppColors.primary,
-                                          backgroundColor: isDark ? Colors.white10 : Colors.grey[200],
-                                          labelStyle: TextStyle(color: isSelected ? Colors.white : (isDark ? Colors.white54 : Colors.black87), fontWeight: FontWeight.bold, fontSize: 12),
-                                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-                                          showCheckmark: false,
-                                          visualDensity: VisualDensity.compact,
-                                        ),
-                                      );
-                                    }).toList(),
+                                    children: [
+                                      _buildSegment("Journal", 0, isDark),
+                                      _buildSegment("Top Ventes", 1, isDark),
+                                      _buildSegment("Achats", 2, isDark),
+                                      _buildSegment("Dormant", 3, isDark),
+                                    ],
                                   ),
                                 ),
-                              ),
-                              const SizedBox(height: 8),
-                              SizedBox(
-                                height: 350,
-                                child: _buildSellerRecentSales(isDark),
-                              ),
-                            ],
-                          ),
-                        ),
-                        const SizedBox(height: 24),
+                                const SizedBox(height: 20),
+                                SizedBox(
+                                  height: 400,
+                                  child: PageView(
+                                    controller: _pageController,
+                                    onPageChanged: (index) => setState(() => _currentTabIndex = index),
+                                    children: [
+                                      _buildFinanceList(isDark),
+                                      _buildTopProductsList(isDark),
+                                      _buildPurchasesList(isDark),
+                                      _buildSleepingStockList(isDark),
+                                    ],
+                                  ),
+                                ),
+                              ],
+                            ),
 
-                      // ─── Accès refusé ────────────────────────────────────────────
-                      ] else ...[
-                        const SizedBox(height: 24),
-                        Center(
-                          child: Column(
-                            children: [
-                              Icon(FontAwesomeIcons.lock, size: 40, color: isDark ? Colors.white24 : Colors.grey.shade400),
-                              const SizedBox(height: 16),
-                              Text("Accès au Dashboard non autorisé", style: TextStyle(color: isDark ? Colors.white38 : Colors.grey.shade500, fontSize: 14, fontWeight: FontWeight.w600)),
-                            ],
-                          ),
-                        ),
-                      ],
-                      const SizedBox(height: 120),
+                          // ─── Vue Chauffeur / Vendeur : Dashboard Personnel ───────────
+                          ] else if (_hasDashboardPerm && !_canViewProfit) ...[
+                            // 🟢 FIX DASHBOARD : 2 KPIs héros mis en avant (Mon CA + Mes Ventes)
+                            Row(
+                              children: [
+                                Expanded(
+                                  child: GlassCard(
+                                    isDark: isDark,
+                                    padding: const EdgeInsets.all(18),
+                                    borderRadius: 20,
+                                    borderColor: AppColors.success.withOpacity(0.3),
+                                    child: Column(
+                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                      children: [
+                                        Container(
+                                          padding: const EdgeInsets.all(8),
+                                          decoration: BoxDecoration(color: AppColors.success.withOpacity(0.12), borderRadius: BorderRadius.circular(10)),
+                                          child: const Icon(FontAwesomeIcons.chartLine, color: AppColors.success, size: 16),
+                                        ),
+                                        const SizedBox(height: 12),
+                                        FittedBox(
+                                          fit: BoxFit.scaleDown,
+                                          alignment: Alignment.centerLeft,
+                                          child: Text(fmtMoney(salesToday), style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w900, color: AppColors.success)),
+                                        ),
+                                        const SizedBox(height: 4),
+                                        Text("Mon CA du Jour", style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: isDark ? Colors.white54 : Colors.grey.shade600)),
+                                      ],
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(width: 14),
+                                Expanded(
+                                  child: GlassCard(
+                                    isDark: isDark,
+                                    padding: const EdgeInsets.all(18),
+                                    borderRadius: 20,
+                                    borderColor: AppColors.primary.withOpacity(0.3),
+                                    child: Column(
+                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                      children: [
+                                        Container(
+                                          padding: const EdgeInsets.all(8),
+                                          decoration: BoxDecoration(color: AppColors.primary.withOpacity(0.12), borderRadius: BorderRadius.circular(10)),
+                                          child: const Icon(FontAwesomeIcons.receipt, color: AppColors.primary, size: 16),
+                                        ),
+                                        const SizedBox(height: 12),
+                                        Text(
+                                          '$salesCount',
+                                          style: const TextStyle(fontSize: 32, fontWeight: FontWeight.w900, color: AppColors.primary),
+                                        ),
+                                        const SizedBox(height: 4),
+                                        Text("Mes Ventes", style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: isDark ? Colors.white54 : Colors.grey.shade600)),
+                                      ],
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 24),
+
+                            // 🛠️ NOUVEAU : Journal des ventes récentes pour vendeur/chauffeur
+                            GlassCard(
+                              isDark: isDark,
+                              padding: const EdgeInsets.all(0),
+                              borderRadius: 20,
+                              child: Column(
+                                children: [
+                                  Padding(
+                                    padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+                                    child: Row(
+                                      children: [
+                                        Container(
+                                          padding: const EdgeInsets.all(8),
+                                          decoration: BoxDecoration(color: AppColors.primary.withOpacity(0.12), borderRadius: BorderRadius.circular(10)),
+                                          child: const Icon(FontAwesomeIcons.clockRotateLeft, color: AppColors.primary, size: 16),
+                                        ),
+                                        const SizedBox(width: 10),
+                                        Text("Dernières Ventes", style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800, color: isDark ? Colors.white : Colors.black)),
+                                        const Spacer(),
+                                        Container(
+                                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                          decoration: BoxDecoration(color: AppColors.primary.withOpacity(0.1), borderRadius: BorderRadius.circular(8)),
+                                          child: Text("${_financeData.length}", style: const TextStyle(color: AppColors.primary, fontWeight: FontWeight.w900, fontSize: 13)),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                  // Chips de filtrage quantité
+                                  Padding(
+                                    padding: const EdgeInsets.symmetric(horizontal: 16),
+                                    child: SingleChildScrollView(
+                                      scrollDirection: Axis.horizontal,
+                                      child: Row(
+                                        children: [10, 50, 100, 0].map((n) {
+                                          final label = n == 0 ? 'Tout' : '$n';
+                                          final isSelected = _sellerSalesLimit == n;
+                                          return Padding(
+                                            padding: const EdgeInsets.only(right: 6),
+                                            child: ChoiceChip(
+                                              label: Text(label),
+                                              selected: isSelected,
+                                              onSelected: (_) => setState(() => _sellerSalesLimit = n),
+                                              selectedColor: AppColors.primary,
+                                              backgroundColor: isDark ? Colors.white10 : Colors.grey[200],
+                                              labelStyle: TextStyle(color: isSelected ? Colors.white : (isDark ? Colors.white54 : Colors.black87), fontWeight: FontWeight.bold, fontSize: 12),
+                                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+                                              showCheckmark: false,
+                                              visualDensity: VisualDensity.compact,
+                                            ),
+                                          );
+                                        }).toList(),
+                                      ),
+                                    ),
+                                  ),
+                                  const SizedBox(height: 8),
+                                  SizedBox(
+                                    height: 350,
+                                    child: _buildSellerRecentSales(isDark),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            const SizedBox(height: 24),
+
+                          // ─── Accès refusé ────────────────────────────────────────────
+                          ] else ...[
+                            const SizedBox(height: 24),
+                            Center(
+                              child: Column(
+                                children: [
+                                  Icon(FontAwesomeIcons.lock, size: 40, color: isDark ? Colors.white24 : Colors.grey.shade400),
+                                  const SizedBox(height: 16),
+                                  Text("Accès au Dashboard non autorisé", style: TextStyle(color: isDark ? Colors.white38 : Colors.grey.shade500, fontSize: 14, fontWeight: FontWeight.w600)),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ]
+                      );
+                    }
+                  ),
+                  const SizedBox(height: 120),
                     ],
                   ),
                 ),
@@ -838,104 +795,6 @@ class _DashboardPageState extends State<DashboardPage> {
     );
   }
 
-  Widget _buildToolItem(IconData icon, String label, Color color, bool isDark, VoidCallback onTap, {int? badge}) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Stack(
-            clipBehavior: Clip.none,
-            children: [
-              Container(
-                width: 44, height: 44,
-                decoration: BoxDecoration(
-                  gradient: LinearGradient(
-                    colors: [color.withOpacity(isDark ? 0.20 : 0.12), color.withOpacity(isDark ? 0.08 : 0.04)],
-                    begin: Alignment.topLeft,
-                    end: Alignment.bottomRight,
-                  ),
-                  borderRadius: BorderRadius.circular(16),
-                  border: Border.all(color: color.withOpacity(0.15), width: 0.5),
-                ),
-                child: Icon(icon, color: color, size: 20),
-              ),
-              if (badge != null)
-                Positioned(
-                  right: -5, top: -5,
-                  child: Container(
-                    padding: const EdgeInsets.all(4.5),
-                    decoration: BoxDecoration(
-                      color: Colors.red,
-                      shape: BoxShape.circle,
-                      border: Border.all(color: isDark ? const Color(0xFF0F0F13) : const Color(0xFFF2F4F8), width: 2),
-                    ),
-                    child: Text('$badge', style: const TextStyle(color: Colors.white, fontSize: 9, fontWeight: FontWeight.bold)),
-                  ),
-                ),
-            ],
-          ),
-          const SizedBox(height: 6),
-          FittedBox(
-            fit: BoxFit.scaleDown,
-            child: Text(
-              label,
-              style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: isDark ? Colors.white60 : Colors.grey.shade600),
-              textAlign: TextAlign.center,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildLockedToolItem(IconData icon, String label, bool isDark) {
-    return Column(
-      mainAxisAlignment: MainAxisAlignment.center,
-      children: [
-        Stack(
-          clipBehavior: Clip.none,
-          children: [
-            Container(
-              width: 44, height: 44,
-              decoration: BoxDecoration(
-                color: isDark ? Colors.white.withOpacity(0.05) : Colors.black.withOpacity(0.05),
-                borderRadius: BorderRadius.circular(16),
-                border: Border.all(color: isDark ? Colors.white10 : Colors.black12, width: 0.5),
-              ),
-              child: Icon(icon, color: isDark ? Colors.white30 : Colors.black26, size: 20),
-            ),
-            Positioned(
-              right: -5, top: -5,
-              child: Container(
-                padding: const EdgeInsets.all(4),
-                decoration: BoxDecoration(
-                  color: Colors.grey.shade600,
-                  shape: BoxShape.circle,
-                  border: Border.all(color: isDark ? const Color(0xFF0F0F13) : const Color(0xFFF2F4F8), width: 2),
-                ),
-                child: const Icon(Icons.lock, color: Colors.white, size: 8),
-              ),
-            ),
-          ],
-        ),
-        const SizedBox(height: 6),
-        FittedBox(
-          fit: BoxFit.scaleDown,
-          child: Text(
-            label,
-            style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: isDark ? Colors.white30 : Colors.black26),
-            textAlign: TextAlign.center,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-          ),
-        ),
-      ],
-    );
-  }
-
   Widget _buildMainChartSection(bool isDark, List<SalesTrendModel> cleanData, String totalSales, String title) {
     List<FlSpot> spots = cleanData.asMap().entries.map((e) => FlSpot(e.key.toDouble(), e.value.value)).toList();
     return Container(
@@ -956,7 +815,11 @@ class _DashboardPageState extends State<DashboardPage> {
             Container(padding: const EdgeInsets.all(10), decoration: BoxDecoration(color: Colors.white.withOpacity(0.15), borderRadius: BorderRadius.circular(14)), child: const Icon(FontAwesomeIcons.chartLine, color: Colors.white, size: 16)),
           ]),
           const SizedBox(height: 12),
-          Expanded(child: LineChart(LineChartData(gridData: FlGridData(show: false), titlesData: FlTitlesData(show: false), borderData: FlBorderData(show: false), lineBarsData: [LineChartBarData(spots: spots, isCurved: true, color: Colors.white, barWidth: 2.5, dotData: FlDotData(show: false), belowBarData: BarAreaData(show: true, color: Colors.white.withOpacity(0.15)))]))),
+          Expanded(
+            child: spots.isEmpty 
+              ? Center(child: Text("Aucune donnée disponible", style: TextStyle(color: Colors.white.withOpacity(0.7))))
+              : LineChart(LineChartData(gridData: FlGridData(show: false), titlesData: FlTitlesData(show: false), borderData: FlBorderData(show: false), lineBarsData: [LineChartBarData(spots: spots, isCurved: true, color: Colors.white, barWidth: 2.5, dotData: FlDotData(show: false), belowBarData: BarAreaData(show: true, color: Colors.white.withOpacity(0.15)))]))
+          ),
         ],
       ),
     );
@@ -976,11 +839,29 @@ class _DashboardPageState extends State<DashboardPage> {
         children: [
           Text(title, style: TextStyle(color: isDark ? Colors.white : const Color(0xFF1A1A2E), fontWeight: FontWeight.w800, fontSize: 14)),
           const SizedBox(height: 12),
-          Expanded(child: BarChart(BarChartData(barTouchData: BarTouchData(enabled: false), titlesData: FlTitlesData(show: false), borderData: FlBorderData(show: false), gridData: FlGridData(show: false), barGroups: chartData.asMap().entries.map((e) {
-            double sales = double.tryParse(e.value['total_revenue'].toString()) ?? 0;
-            double profit = double.tryParse(e.value['total_profit'].toString()) ?? 0;
-            return BarChartGroupData(x: e.key, barRods: [BarChartRodData(toY: sales, color: const Color(0xFF6366F1), width: 8, borderRadius: BorderRadius.circular(4)), BarChartRodData(toY: profit, color: const Color(0xFF34D399), width: 8, borderRadius: BorderRadius.circular(4))]);
-          }).toList()))),
+          Expanded(
+            child: chartData.isEmpty 
+                ? Center(child: Text("Aucune donnée disponible", style: TextStyle(color: isDark ? Colors.white54 : Colors.grey)))
+                : BarChart(
+                    BarChartData(
+                      barTouchData: BarTouchData(enabled: false), 
+                      titlesData: FlTitlesData(show: false), 
+                      borderData: FlBorderData(show: false), 
+                      gridData: FlGridData(show: false), 
+                      barGroups: chartData.asMap().entries.map((e) {
+                        double sales = double.tryParse(e.value['total_revenue'].toString()) ?? 0;
+                        double profit = double.tryParse(e.value['total_profit'].toString()) ?? 0;
+                        return BarChartGroupData(
+                          x: e.key, 
+                          barRods: [
+                            BarChartRodData(toY: sales, color: const Color(0xFF6366F1), width: 8, borderRadius: BorderRadius.circular(4)), 
+                            BarChartRodData(toY: profit, color: const Color(0xFF34D399), width: 8, borderRadius: BorderRadius.circular(4))
+                          ]
+                        );
+                      }).toList()
+                    )
+                  )
+          ),
           const SizedBox(height: 8),
           Row(mainAxisAlignment: MainAxisAlignment.center, children: [_legendItem(const Color(0xFF6366F1), "CA"), const SizedBox(width: 20), _legendItem(const Color(0xFF34D399), "Profit")]),
         ],
@@ -1055,20 +936,7 @@ class _DashboardPageState extends State<DashboardPage> {
     );
   }
 
-  Widget _buildHeaderBtn(IconData icon, bool isDark, VoidCallback onTap) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        padding: const EdgeInsets.all(11),
-        decoration: BoxDecoration(
-          color: isDark ? Colors.white.withOpacity(0.06) : Colors.white.withOpacity(0.8),
-          shape: BoxShape.circle,
-          border: Border.all(color: isDark ? Colors.white.withOpacity(0.08) : Colors.grey.shade200, width: 0.5),
-        ),
-        child: Icon(icon, color: isDark ? Colors.white70 : Colors.grey.shade700, size: 18),
-      ),
-    );
-  }
+
 
   Widget _buildDetailStatCard(String title, String value, Color color, IconData icon, bool isDark, VoidCallback onTap) {
     return GestureDetector(
@@ -1286,6 +1154,53 @@ class _DashboardPageState extends State<DashboardPage> {
   Widget _buildModalStatCard(String label, String value, Color color, IconData icon, bool isDark) {
     return Container(padding: const EdgeInsets.all(15), decoration: BoxDecoration(color: color.withOpacity(0.1), borderRadius: BorderRadius.circular(20), border: Border.all(color: color.withOpacity(0.2))), child: Column(children: [Icon(icon, color: color, size: 24), const SizedBox(height: 10), FittedBox(child: Text(value, style: TextStyle(fontWeight: FontWeight.w900, fontSize: 18, color: isDark ? Colors.white : Colors.black))), const SizedBox(height: 2), Text(label, textAlign: TextAlign.center, style: TextStyle(fontSize: 11, color: isDark ? Colors.white70 : Colors.grey[700]))]));
   }
+
+  // 🟢 FONCTION D'EXPULSION AUTOMATIQUE
+  void _forceLogout() {
+    if (mounted) {
+      // Nettoyer SharedPreferences
+      SharedPreferences.getInstance().then((prefs) {
+        prefs.remove('license_key');
+        prefs.remove('user_role');
+        prefs.remove('employee_id');
+        prefs.remove('assigned_warehouse_id');
+        prefs.remove('assigned_register_id');
+        prefs.remove('mobile_user_id');
+        prefs.remove('user_hash');
+      });
+
+      // Rediriger vers l'écran d'activation avec purge de l'historique
+      Navigator.of(context).pushAndRemoveUntil(
+        MaterialPageRoute(builder: (ctx) => ActivationPage(
+          toggleTheme: () {},
+          onThemeModeChanged: (_) {},
+          onLanguageChanged: (_) {},
+        )), 
+        (route) => false
+      );
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('⚠️ Session expirée : Votre compte a été modifié ou désactivé par l\'administrateur. Veuillez vous reconnecter.'),
+        backgroundColor: Colors.redAccent,
+        duration: Duration(seconds: 5),
+      ));
+    }
+  }
+
+  // 🔒 FONCTION DE VERROUILLAGE ÉCRAN
+  void _showLockScreen() {
+    if (mounted) {
+      Navigator.of(context).pushAndRemoveUntil(
+        PageRouteBuilder(
+          pageBuilder: (context, animation, secondaryAnimation) => const AppLockedPage(),
+          transitionsBuilder: (context, animation, secondaryAnimation, child) {
+            return FadeTransition(opacity: animation, child: child);
+          },
+          transitionDuration: const Duration(milliseconds: 400),
+        ),
+        (route) => false
+      );
+    }
+  }
 }
 
 
@@ -1362,52 +1277,6 @@ class _DaySalesModalState extends State<DaySalesModal> {
     final data = await widget.api.getSalesByDay(widget.date);
     if(mounted) setState(() { _sales = data; _loading = false; });
   }
-Future<void> _quickPrint(BuildContext context, String format, String docType, dynamic id) async {
-    // 1. Ouvrir le Modal d'options
-    final config = await showModalBottomSheet<Map<String, dynamic>>(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-      builder: (ctx) => PrintConfigModal(initialFormat: format),
-    );
-
-    if (config != null && context.mounted) {
-      showDialog(
-        context: context,
-        barrierDismissible: false,
-        builder: (ctx) => Dialog(
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
-          child: Padding(
-            padding: const EdgeInsets.all(20),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: const [
-                CircularProgressIndicator(),
-                SizedBox(width: 20),
-                Text("Demande au PC...", style: TextStyle(fontWeight: FontWeight.bold)),
-              ],
-            ),
-          ),
-        ),
-      );
-
-      // 2. Appel de la nouvelle fonction magique
-      final success = await widget.api.printViaPC(
-        config['format'], 
-        docType, 
-        id,
-        options: config
-      );
-
-      if (context.mounted) Navigator.pop(context); // Ferme le loader
-
-      if (!success && context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text("Échec : Le PC de la boutique est-il allumé et connecté ?")),
-        );
-      }
-    }
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -1439,7 +1308,6 @@ Future<void> _quickPrint(BuildContext context, String format, String docType, dy
                                     child: const Icon(FontAwesomeIcons.receipt, size: 16, color: Colors.blue),
                                   ),
                                   const SizedBox(width: 15),
-                                  // Le widget Expanded empêche le dépassement d'écran !
                                   Expanded(
                                     child: Column(
                                       crossAxisAlignment: CrossAxisAlignment.start,
@@ -1449,36 +1317,7 @@ Future<void> _quickPrint(BuildContext context, String format, String docType, dy
                                       ],
                                     ),
                                   ),
-                                  // Colonne de droite (Prix + Petits boutons)
-                                  Column(
-                                    crossAxisAlignment: CrossAxisAlignment.end,
-                                    children: [
-                                      Text(fmtMoney(s['total_amount']), style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15, color: AppColors.primary)),
-                                      const SizedBox(height: 5),
-                                      Row(
-                                        mainAxisSize: MainAxisSize.min,
-                                        children: [
-                                          InkWell(
-                                            onTap: () => _quickPrint(context, 'A5', 'bl', s['id']),
-                                            child: Container(
-                                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                                              decoration: BoxDecoration(color: Colors.green.withOpacity(0.1), borderRadius: BorderRadius.circular(5)),
-                                              child: const Icon(FontAwesomeIcons.truckFast, size: 14, color: Colors.green),
-                                            ),
-                                          ),
-                                          const SizedBox(width: 8),
-                                          InkWell(
-                                            onTap: () => _quickPrint(context, 'A4', 'sale', s['id']),
-                                            child: Container(
-                                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                                              decoration: BoxDecoration(color: Colors.redAccent.withOpacity(0.1), borderRadius: BorderRadius.circular(5)),
-                                              child: const Icon(FontAwesomeIcons.filePdf, size: 14, color: Colors.redAccent),
-                                            ),
-                                          ),
-                                        ],
-                                      ),
-                                    ],
-                                  ),
+                                  Text(fmtMoney(s['total_amount']), style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15, color: AppColors.primary)),
                                 ],
                               ),
                             ),
@@ -1570,107 +1409,6 @@ class TransactionDetailSheet extends StatelessWidget {
               ],
             ),
           ),
-          const SizedBox(height: 10),
-
-       if (isSale) ...[
-            const Align(alignment: Alignment.centerLeft, child: Text("📄 Imprimer Facture :", style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.grey))),
-            const SizedBox(height: 8),
-            Row(
-              children: [
-                Expanded(child: _buildPrintBtn(context, "Ticket", FontAwesomeIcons.receipt, Colors.teal, 'Ticket', 'sale', data['id'])),
-                const SizedBox(width: 10),
-                Expanded(child: _buildPrintBtn(context, "A5", FontAwesomeIcons.fileLines, Colors.blueAccent, 'A5', 'sale', data['id'])),
-                const SizedBox(width: 10),
-                Expanded(child: _buildPrintBtn(context, "A4", FontAwesomeIcons.filePdf, Colors.redAccent, 'A4', 'sale', data['id'])),
-              ],
-            ),
-            const SizedBox(height: 15),
-            const Align(alignment: Alignment.centerLeft, child: Text("🚚 Imprimer Bon de Livraison :", style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.grey))),
-            const SizedBox(height: 8),
-            Row(
-              children: [
-                Expanded(child: _buildPrintBtn(context, "Ticket", FontAwesomeIcons.receipt, Colors.teal, 'Ticket', 'bl', data['id'])),
-                const SizedBox(width: 10),
-                Expanded(child: _buildPrintBtn(context, "A5", FontAwesomeIcons.fileLines, Colors.blueAccent, 'A5', 'bl', data['id'])),
-                const SizedBox(width: 10),
-                Expanded(child: _buildPrintBtn(context, "A4", FontAwesomeIcons.filePdf, Colors.redAccent, 'A4', 'bl', data['id'])),
-              ],
-            ),
-          ] else ...[
-            const Align(alignment: Alignment.centerLeft, child: Text("🛒 Imprimer Bon de Commande :", style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.grey))),
-            const SizedBox(height: 8),
-            Row(
-              children: [
-                Expanded(child: _buildPrintBtn(context, "Ticket", FontAwesomeIcons.receipt, Colors.teal, 'Ticket', 'purchase', data['id'])),
-                const SizedBox(width: 10),
-                Expanded(child: _buildPrintBtn(context, "A5", FontAwesomeIcons.fileLines, Colors.blueAccent, 'A5', 'purchase', data['id'])),
-                const SizedBox(width: 10),
-                Expanded(child: _buildPrintBtn(context, "A4", FontAwesomeIcons.filePdf, Colors.redAccent, 'A4', 'purchase', data['id'])),
-              ],
-            ),
-          ],
-        ],
-      ),
-    );
-  }
-
-Widget _buildPrintBtn(BuildContext context, String label, IconData icon, Color color, String format, String docType, dynamic docId) {
-    return ElevatedButton(
-      onPressed: () async {
-        final config = await showModalBottomSheet<Map<String, dynamic>>(
-          context: context,
-          isScrollControlled: true,
-          backgroundColor: Colors.transparent,
-          builder: (ctx) => PrintConfigModal(initialFormat: format),
-        );
-
-        if (config != null && context.mounted) {
-          showDialog(
-            context: context,
-            barrierDismissible: false,
-            builder: (ctx) => Dialog(
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
-              child: Padding(
-                padding: const EdgeInsets.all(20),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: const [
-                    CircularProgressIndicator(),
-                    SizedBox(width: 20),
-                    Text("Demande au PC...", style: TextStyle(fontWeight: FontWeight.bold)),
-                  ],
-                ),
-              ),
-            ),
-          );
-
-          final success = await api.printViaPC(
-            config['format'], 
-            docType, 
-            docId, 
-            options: config
-          );
-
-          if (context.mounted) Navigator.pop(context);
-
-          if (!success && context.mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Échec : Le PC est-il allumé et connecté ?")));
-          }
-        }
-      },
-      style: ElevatedButton.styleFrom(
-        backgroundColor: color.withOpacity(0.1),
-        foregroundColor: color,
-        elevation: 0,
-        padding: const EdgeInsets.symmetric(vertical: 12),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12), side: BorderSide(color: color.withOpacity(0.3))),
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(icon, size: 20),
-          const SizedBox(height: 4),
-          Text(label, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
         ],
       ),
     );

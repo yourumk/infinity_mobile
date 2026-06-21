@@ -1,4 +1,4 @@
-import 'dart:convert';
+﻿import 'dart:convert';
 import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
@@ -6,7 +6,7 @@ import 'package:intl/intl.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../core/constants.dart';
 import '../services/api_service.dart';
-import '../widgets/print_config_modal.dart';
+
 
 class ClientDetailsPage extends StatefulWidget {
   final Map<String, dynamic> summary;
@@ -23,8 +23,9 @@ class _ClientDetailsPageState extends State<ClientDetailsPage> with SingleTicker
   Map<String, dynamic> _fullData = {};
   bool _isLoading = true;
   double _currentBalance = 0;
-  // 🟢 RBAC : Droit d'encaisser les versements clients
-  bool _canAddPayment = false;
+  
+  // 🟢 FIX : Le versement est désormais accessible à tous les rôles par défaut.
+  bool _canAddPayment = true; 
 
   @override
   void initState() {
@@ -33,24 +34,10 @@ class _ClientDetailsPageState extends State<ClientDetailsPage> with SingleTicker
     _fullData = widget.summary;
     _currentBalance = double.tryParse(widget.summary['balance']?.toString() ?? '0') ?? 0;
     _loadDetails();
-    _loadPermissions();
   }
 
-  Future<void> _loadPermissions() async {
-    final prefs = await SharedPreferences.getInstance();
-    final role = prefs.getString('user_role') ?? '';
-    final permsString = prefs.getString('user_permissions') ?? '[]';
-    List<String> perms = [];
-    try {
-      perms = (json.decode(permsString) as List).map((e) => e.toString()).toList();
-    } catch (_) {}
-    if (mounted) {
-      setState(() {
-        // Admin a toujours accès ; sinon vérifier la permission spécifique
-        _canAddPayment = role == 'admin' || role == 'manager' || perms.contains('mobile_client_payment');
-      });
-    }
-  }
+  // 🟢 Fonction conservée vide au cas où d'autres composants l'appelleraient
+  Future<void> _loadPermissions() async {}
 
   @override
   void dispose() {
@@ -86,45 +73,7 @@ class _ClientDetailsPageState extends State<ClientDetailsPage> with SingleTicker
     );
   }
 
-  Future<void> _quickPrint(BuildContext context, String format, String docType, dynamic id) async {
-    final config = await showModalBottomSheet<Map<String, dynamic>>(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-      builder: (ctx) => PrintConfigModal(initialFormat: format),
-    );
 
-    if (config != null && context.mounted) {
-      showDialog(
-        context: context,
-        barrierDismissible: false,
-        builder: (ctx) => Dialog(
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
-          child: Padding(
-            padding: const EdgeInsets.all(20),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: const [
-                CircularProgressIndicator(),
-                SizedBox(width: 20),
-                Text("Demande au PC...", style: TextStyle(fontWeight: FontWeight.bold)),
-              ],
-            ),
-          ),
-        ),
-      );
-
-      final success = await _api.printViaPC(config['format'], docType, id, options: config);
-
-      if (context.mounted) Navigator.pop(context);
-
-      if (!success && context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text("Échec : Le PC de la boutique est-il allumé et connecté ?")),
-        );
-      }
-    }
-  }
 
   void _showPaymentModal() {
     final name = _fullData['name']?.toString() ?? 'Client';
@@ -228,7 +177,7 @@ class _ClientDetailsPageState extends State<ClientDetailsPage> with SingleTicker
                   children: [
                     const Text("Solde", style: TextStyle(color: Colors.white70, fontSize: 12)),
                     Text(
-                      NumberFormat.currency(locale: 'fr_DZ', symbol: 'DA', decimalDigits: 0).format(_currentBalance),
+                      NumberFormat.currency(locale: 'fr_DZ', symbol: 'DA', decimalDigits: 2).format(_currentBalance),
                       style: const TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.w900),
                     ),
                   ],
@@ -252,18 +201,16 @@ class _ClientDetailsPageState extends State<ClientDetailsPage> with SingleTicker
                   controller: _tabController,
                   children: [
                     ListView.builder(
-                      padding: const EdgeInsets.all(20),
+                      padding: EdgeInsets.fromLTRB(20, 20, 20, MediaQuery.of(context).padding.bottom + 100),
                       itemCount: sales.length,
                       itemBuilder: (ctx, i) {
                         final s = sales[i];
-                        if (s == null || s is! Map) return const SizedBox.shrink(); // Ignore les lignes corrompues
+                        if (s == null || s is! Map) return const SizedBox.shrink();
 
-                        // Protection des dates
                         DateTime? parsedDate;
                         if (s['date'] != null) parsedDate = DateTime.tryParse(s['date'].toString());
                         final dateStr = parsedDate != null ? DateFormat('dd/MM/yyyy HH:mm').format(parsedDate) : '-';
                         
-                        // Protection des remises
                         double discount = 0;
                         if (s['discount_value'] != null) discount = double.tryParse(s['discount_value'].toString()) ?? 0;
 
@@ -280,13 +227,7 @@ class _ClientDetailsPageState extends State<ClientDetailsPage> with SingleTicker
                               decoration: BoxDecoration(color: Colors.blue.withOpacity(0.1), shape: BoxShape.circle),
                               child: const Icon(FontAwesomeIcons.bagShopping, color: Colors.blue, size: 18),
                             ),
-                           title: Row(
-                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                              children: [
-                                Text("Vente #${s['invoice_number'] ?? s['id'] ?? '?'}", style: TextStyle(fontWeight: FontWeight.bold, color: isDark ? Colors.white : Colors.black)),
-                                Text("${s['total_amount'] ?? 0} DA", style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.blue)),
-                              ],
-                            ),
+                            title: Text("Vente #${s['invoice_number'] ?? s['id'] ?? '?'}", style: TextStyle(fontWeight: FontWeight.bold, color: isDark ? Colors.white : Colors.black), maxLines: 1, overflow: TextOverflow.ellipsis),
                             subtitle: Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
@@ -295,25 +236,13 @@ class _ClientDetailsPageState extends State<ClientDetailsPage> with SingleTicker
                                   Text("Remise : -${discount.toStringAsFixed(0)} DA", style: const TextStyle(color: Colors.orange, fontSize: 12, fontWeight: FontWeight.bold)),
                               ],
                             ),
-                            trailing: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                IconButton(
-                                  icon: const Icon(FontAwesomeIcons.truckFast, size: 18, color: Colors.green),
-                                  onPressed: () => _quickPrint(context, 'A5', 'bl', s['id']),
-                                ),
-                                IconButton(
-                                  icon: const Icon(FontAwesomeIcons.filePdf, size: 18, color: Colors.redAccent),
-                                  onPressed: () => _quickPrint(context, 'A4', 'sale', s['id']),
-                                ),
-                              ],
-                            ),
+                            trailing: Text("${s['total_amount'] ?? 0} DA", style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.blue, fontSize: 14)),
                           ),
                         );
                       },
                     ),
                     ListView.builder(
-                      padding: const EdgeInsets.all(20),
+                      padding: EdgeInsets.fromLTRB(20, 20, 20, MediaQuery.of(context).padding.bottom + 100),
                       itemCount: payments.length,
                       itemBuilder: (ctx, i) {
                         final p = payments[i];
@@ -328,17 +257,7 @@ class _ClientDetailsPageState extends State<ClientDetailsPage> with SingleTicker
                           leading: const Icon(Icons.check_circle, color: Colors.green),
                           title: const Text("Versement reçu", style: TextStyle(fontWeight: FontWeight.bold)),
                           subtitle: Text(dateStr),
-                          trailing: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Text("+${p['amount'] ?? 0} DA", style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.green)),
-                              const SizedBox(width: 10),
-                              IconButton(
-                                icon: const Icon(FontAwesomeIcons.receipt, size: 18, color: Colors.blue),
-                                onPressed: () => _quickPrint(context, 'Ticket', 'pay_client', p['id']),
-                              ),
-                            ],
-                          ),
+                          trailing: Text("+${p['amount'] ?? 0} DA", style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.green)),
                         );
                       },
                     ),
@@ -377,27 +296,54 @@ class TransactionDetailSheet extends StatelessWidget {
     final name = isSale ? (data['client_name']?.toString() ?? 'Client') : (data['supplier_name']?.toString() ?? 'Fournisseur');
     final color = isSale ? Colors.blue : Colors.orange;
 
+    final fmt = NumberFormat.currency(locale: 'fr_DZ', symbol: '', decimalDigits: 2);
+    final totalAmount = double.tryParse(data['total_amount']?.toString() ?? '0') ?? 0;
+    final totalHT = double.tryParse(data['total_ht']?.toString() ?? '0') ?? 0;
+    final totalVat = double.tryParse(data['total_vat']?.toString() ?? '0') ?? 0;
+    final timbre = double.tryParse(data['timbre']?.toString() ?? '0') ?? 0;
+    final discountVal = double.tryParse(data['discount_value']?.toString() ?? data['global_discount']?.toString() ?? '0') ?? 0;
+    final amountPaid = double.tryParse(data['amount_paid']?.toString() ?? '0') ?? 0;
+    final remaining = totalAmount - amountPaid;
+    final paymentType = data['payment_type']?.toString();
+    final isReturn = data['is_return'] == 1 || data['is_return'] == true;
+    final userName = data['user_name']?.toString() ?? data['source']?.toString();
+    final registerName = data['register_name']?.toString();
+    final warehouseName = data['warehouse_name']?.toString();
+
     return Container(
       height: MediaQuery.of(context).size.height * 0.85, 
-      padding: const EdgeInsets.all(24),
+      padding: EdgeInsets.fromLTRB(24, 24, 24, MediaQuery.of(context).padding.bottom + 20),
       decoration: BoxDecoration(
         color: isDark ? const Color(0xFF1E1E2C) : Colors.white,
         borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
       ),
       child: Column(
         children: [
-          // 🟢 DRAG HANDLE standardisé
           Container(width: 40, height: 4, decoration: BoxDecoration(color: Colors.grey[300], borderRadius: BorderRadius.circular(10))),
           const SizedBox(height: 16),
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(title, style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: isDark ? Colors.white : Colors.black)),
-                  Text(name, style: const TextStyle(color: Colors.grey, fontSize: 13)),
-                ],
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Flexible(child: Text(title, style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: isDark ? Colors.white : Colors.black), overflow: TextOverflow.ellipsis)),
+                        if (isReturn) ...[
+                          const SizedBox(width: 8),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                            decoration: BoxDecoration(color: Colors.red.withOpacity(0.15), borderRadius: BorderRadius.circular(6), border: Border.all(color: Colors.red.withOpacity(0.4))),
+                            child: const Text("RETOUR", style: TextStyle(fontSize: 10, fontWeight: FontWeight.w900, color: Colors.red)),
+                          ),
+                        ],
+                      ],
+                    ),
+                    Text(name, style: const TextStyle(color: Colors.grey, fontSize: 13)),
+                  ],
+                ),
               ),
               IconButton(icon: const Icon(Icons.close), onPressed: () => Navigator.pop(context)),
             ],
@@ -419,7 +365,7 @@ class TransactionDetailSheet extends StatelessWidget {
                   separatorBuilder: (c,i) => const Divider(height: 1),
                   itemBuilder: (c, i) {
                     final item = items[i];
-                    if (item == null || item is! Map) return const SizedBox.shrink(); // Protection élément nul
+                    if (item == null || item is! Map) return const SizedBox.shrink();
 
                     final qty = double.tryParse(item['qty']?.toString() ?? '0') ?? 0;
                     final price = double.tryParse(isSale ? item['price']?.toString() ?? '0' : item['cost']?.toString() ?? '0') ?? 0;
@@ -433,8 +379,7 @@ class TransactionDetailSheet extends StatelessWidget {
                         child: Text("${qty % 1 == 0 ? qty.toInt() : qty}x", style: TextStyle(fontWeight: FontWeight.bold, color: color)),
                       ),
                       title: Text(item['name']?.toString() ?? 'Article', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14, color: isDark ? Colors.white : Colors.black)),
-                      trailing: Text("${NumberFormat.currency(locale: 'fr_DZ', symbol: '', decimalDigits: 0).format(total)} DA", 
-                        style: TextStyle(fontWeight: FontWeight.bold, color: isDark ? Colors.white : Colors.black)),
+                      trailing: Text("${fmt.format(total)} DA", style: TextStyle(fontWeight: FontWeight.bold, color: isDark ? Colors.white : Colors.black)),
                     );
                   },
                 );
@@ -442,113 +387,74 @@ class TransactionDetailSheet extends StatelessWidget {
             ),
           ),
           
-          const Divider(),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              const Text("TOTAL TTC", style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
-              Text("${data['total_amount'] ?? 0} DA", style: TextStyle(fontSize: 24, fontWeight: FontWeight.w900, color: color)),
-            ],
-          ),
+          // ── BLOC RÉCAPITULATIF (style ticket de caisse) ──
+          Divider(color: Colors.grey.withOpacity(0.2)),
           
-          const SizedBox(height: 20),
-
-          if (isSale) ...[
-            const Align(alignment: Alignment.centerLeft, child: Text("📄 Imprimer Facture :", style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.grey))),
-            const SizedBox(height: 8),
-            Row(
-              children: [
-                Expanded(child: _buildPrintBtn(context, "Ticket", FontAwesomeIcons.receipt, Colors.teal, 'Ticket', 'sale', data['id'])),
-                const SizedBox(width: 10),
-                Expanded(child: _buildPrintBtn(context, "A5", FontAwesomeIcons.fileLines, Colors.blueAccent, 'A5', 'sale', data['id'])),
-                const SizedBox(width: 10),
-                Expanded(child: _buildPrintBtn(context, "A4", FontAwesomeIcons.filePdf, Colors.redAccent, 'A4', 'sale', data['id'])),
-              ],
+          // Vendeur / Caisse / Dépôt
+          if (userName != null || registerName != null || warehouseName != null) ...[
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 6),
+              child: Wrap(
+                spacing: 16, runSpacing: 4,
+                children: [
+                  if (userName != null) _infoChip(Icons.person_outline, userName, isDark),
+                  if (registerName != null) _infoChip(Icons.point_of_sale, registerName, isDark),
+                  if (warehouseName != null) _infoChip(Icons.warehouse_outlined, warehouseName, isDark),
+                ],
+              ),
             ),
-            const SizedBox(height: 15),
-            const Align(alignment: Alignment.centerLeft, child: Text("🚚 Imprimer Bon de Livraison :", style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.grey))),
-            const SizedBox(height: 8),
-            Row(
-              children: [
-                Expanded(child: _buildPrintBtn(context, "Ticket", FontAwesomeIcons.receipt, Colors.teal, 'Ticket', 'bl', data['id'])),
-                const SizedBox(width: 10),
-                Expanded(child: _buildPrintBtn(context, "A5", FontAwesomeIcons.fileLines, Colors.blueAccent, 'A5', 'bl', data['id'])),
-                const SizedBox(width: 10),
-                Expanded(child: _buildPrintBtn(context, "A4", FontAwesomeIcons.filePdf, Colors.redAccent, 'A4', 'bl', data['id'])),
-              ],
-            ),
-          ] else ...[
-            const Align(alignment: Alignment.centerLeft, child: Text("🛒 Imprimer Bon de Commande :", style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.grey))),
-            const SizedBox(height: 8),
-            Row(
-              children: [
-                Expanded(child: _buildPrintBtn(context, "Ticket", FontAwesomeIcons.receipt, Colors.teal, 'Ticket', 'purchase', data['id'])),
-                const SizedBox(width: 10),
-                Expanded(child: _buildPrintBtn(context, "A5", FontAwesomeIcons.fileLines, Colors.blueAccent, 'A5', 'purchase', data['id'])),
-                const SizedBox(width: 10),
-                Expanded(child: _buildPrintBtn(context, "A4", FontAwesomeIcons.filePdf, Colors.redAccent, 'A4', 'purchase', data['id'])),
-              ],
-            ),
+            Divider(color: Colors.grey.withOpacity(0.1)),
           ],
+
+          // Lignes financières conditionnelles
+          if (totalHT > 0) _summaryRow("Total HT", "${fmt.format(totalHT)} DA", isDark),
+          if (totalVat > 0) _summaryRow("TVA", "${fmt.format(totalVat)} DA", isDark),
+          if (timbre > 0) _summaryRow("Timbre fiscal", "${fmt.format(timbre)} DA", isDark),
+          if (discountVal > 0) _summaryRow("Remise", "-${fmt.format(discountVal)} DA", isDark, valueColor: Colors.red),
+          
+          Divider(color: Colors.grey.withOpacity(0.2)),
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 6),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                const Text("TOTAL TTC", style: TextStyle(fontSize: 17, fontWeight: FontWeight.w900)),
+                Text("${fmt.format(totalAmount)} DA", style: TextStyle(fontSize: 22, fontWeight: FontWeight.w900, color: color, fontFeatures: const [FontFeature.tabularFigures()])),
+              ],
+            ),
+          ),
+          Divider(color: Colors.grey.withOpacity(0.2)),
+
+          if (amountPaid > 0) _summaryRow("Versé", "${fmt.format(amountPaid)} DA", isDark, valueColor: Colors.green),
+          if (remaining > 0.5) _summaryRow("Reste à payer", "${fmt.format(remaining)} DA", isDark, valueColor: Colors.red, bold: true),
+          if (paymentType != null && paymentType.isNotEmpty)
+            _summaryRow("Paiement", paymentType == 'credit' ? 'Crédit' : paymentType == 'cash' ? 'Espèces' : paymentType, isDark),
         ],
       ),
     );
   }
 
-  Widget _buildPrintBtn(BuildContext context, String label, IconData icon, Color color, String format, String docType, dynamic docId) {
-    return ElevatedButton(
-      onPressed: () async {
-        final config = await showModalBottomSheet<Map<String, dynamic>>(
-          context: context,
-          isScrollControlled: true,
-          backgroundColor: Colors.transparent,
-          builder: (ctx) => PrintConfigModal(initialFormat: format),
-        );
-
-        if (config != null && context.mounted) {
-          showDialog(
-            context: context,
-            barrierDismissible: false,
-            builder: (ctx) => Dialog(
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
-              child: Padding(
-                padding: const EdgeInsets.all(20),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: const [
-                    CircularProgressIndicator(),
-                    SizedBox(width: 20),
-                    Text("Demande au PC...", style: TextStyle(fontWeight: FontWeight.bold)),
-                  ],
-                ),
-              ),
-            ),
-          );
-
-          final success = await api.printViaPC(config['format'], docType, docId, options: config);
-
-          if (context.mounted) Navigator.pop(context);
-
-          if (!success && context.mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Échec : Le PC est-il allumé et connecté ?")));
-          }
-        }
-      },
-      style: ElevatedButton.styleFrom(
-        backgroundColor: color.withOpacity(0.1),
-        foregroundColor: color,
-        elevation: 0,
-        padding: const EdgeInsets.symmetric(vertical: 12),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12), side: BorderSide(color: color.withOpacity(0.3))),
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
+  Widget _summaryRow(String label, String value, bool isDark, {Color? valueColor, bool bold = false}) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 3),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          Icon(icon, size: 20),
-          const SizedBox(height: 4),
-          Text(label, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
+          Text(label, style: TextStyle(fontSize: 13, color: isDark ? Colors.white60 : Colors.grey[600], fontWeight: bold ? FontWeight.bold : FontWeight.normal)),
+          Text(value, style: TextStyle(fontSize: 14, fontWeight: bold ? FontWeight.w900 : FontWeight.w600, color: valueColor ?? (isDark ? Colors.white : Colors.black), fontFeatures: const [FontFeature.tabularFigures()])),
         ],
       ),
+    );
+  }
+
+  Widget _infoChip(IconData icon, String text, bool isDark) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(icon, size: 14, color: Colors.grey[500]),
+        const SizedBox(width: 4),
+        Text(text, style: TextStyle(fontSize: 12, color: isDark ? Colors.white70 : Colors.black54)),
+      ],
     );
   }
 }

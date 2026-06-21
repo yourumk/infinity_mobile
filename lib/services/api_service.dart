@@ -16,13 +16,14 @@ import 'package:pdf/pdf.dart';
 import 'package:print_bluetooth_thermal/print_bluetooth_thermal.dart';
 import 'package:esc_pos_utils_plus/esc_pos_utils_plus.dart';
 import 'package:image/image.dart' as img;
+import '../providers/feature_provider.dart';
 
 class ApiService {
   static final ApiService _instance = ApiService._internal();
   factory ApiService() => _instance;
   ApiService._internal();
 
-  static const String _baseUrl = "https://infi-nasro2.online/api";
+  static const String _baseUrl = "https://infi-algdzyounesnasro.it.com/api";
   static const String _queueKey = "offline_command_queue_v7";
   static const String _cacheKeyCatalog = "offline_catalog_cache";
   static const String _deltasKey = "pending_deltas_v1";
@@ -30,6 +31,7 @@ class ApiService {
   // 🟢 DIAGNOSTIC
   String? _lastError;
   String? get lastError => _lastError;
+  set lastError(String? value) => _lastError = value;
   void clearError() => _lastError = null; 
 
   String _humanizeError(dynamic error) {
@@ -124,8 +126,14 @@ class ApiService {
       final db = await database;
       final rows = await db.query('cart_items', where: 'cart_type = ?', whereArgs: [cartType]);
       if (rows.isNotEmpty) {
-        final List<dynamic> decoded = json.decode(rows.first['data'] as String);
-        return decoded.map((e) => Map<String, dynamic>.from(e)).toList();
+        try {
+          final List<dynamic> decoded = json.decode(rows.first['data'] as String);
+          return decoded.map((e) => Map<String, dynamic>.from(e)).toList();
+        } catch (e) {
+          debugPrint("Cache corrompu purgé (cart_type: $cartType)");
+          await db.delete('cart_items', where: 'cart_type = ?', whereArgs: [cartType]);
+          return [];
+        }
       }
     } catch (e) {
       debugPrint('❌ Erreur loadCart: $e');
@@ -167,7 +175,13 @@ class ApiService {
       final db = await database;
       final rows = await db.query('tiers_cache', where: 'key = ?', whereArgs: [key]);
       if (rows.isNotEmpty) {
-        return json.decode(rows.first['data'] as String);
+        try {
+          return json.decode(rows.first['data'] as String);
+        } catch (e) {
+          debugPrint("Cache corrompu purgé (key: $key)");
+          await db.delete('tiers_cache', where: 'key = ?', whereArgs: [key]);
+          return [];
+        }
       }
     } catch (e) {
       debugPrint('❌ Erreur _loadTiersCache: $e');
@@ -183,10 +197,11 @@ class ApiService {
     if (path.startsWith('data:')) return null; 
     
     String fileName = path.replaceAll('\\', '/').split('/').last;
-    return 'https://infi-nasro2.online/api/mobile_images/$fileName';
+    return 'https://infi-algdzyounesnasro.it.com/api/mobile_images/$fileName';
   }
 
-  List<Map<String, dynamic>> _commandQueue = [];
+ List<Map<String, dynamic>> _commandQueue = [];
+  final List<Map<String, dynamic>> _recentAddedTiers = []; // 🟢 Cache temporaire pour éviter les disparitions
   List<Map<String, dynamic>> get currentQueue => List.unmodifiable(_commandQueue);
   
   void _notifyDataUpdated() {
@@ -218,6 +233,36 @@ class ApiService {
   final StreamController<int?> _warehouseChangeController = StreamController<int?>.broadcast();
   Stream<int?> get onWarehouseChanged => _warehouseChangeController.stream;
 
+ // 🟢 HELPER SÉCURITÉ ABSOLUE & CADENAS
+  void _checkUnauthorized(http.Response res) {
+    if (res.statusCode == 401 || res.statusCode == 403) {
+      // 1. Suppression/Modification (On rase TOUT pour éviter la boucle de synchro infinie)
+      if (res.body.contains('AUTH_INVALID') || res.body.contains('invalid_token') || res.statusCode == 403) {
+        debugPrint("🚨 [SÉCURITÉ] Désynchronisation totale détectée. Purge du téléphone.");
+        _commandQueue.clear();
+        _pendingDeltas.clear();
+        clearCache(); 
+        
+        // 🚀 Destruction physique de la file d'attente hors-ligne
+        database.then((db) {
+           db.delete('queue');
+           db.delete('active_tour');
+           db.delete('offline_transfers');
+        });
+        
+        SharedPreferences.getInstance().then((prefs) {
+          prefs.clear(); 
+        });
+        throw Exception('AUTH_INVALID'); 
+      }
+      
+      // 2. Cadenas de l'administrateur (On garde les données, on bloque juste l'écran)
+      if (res.body.contains('AUTH_LOCKED')) {
+        throw Exception('AUTH_LOCKED');
+      }
+    }
+  }
+
   Future<Map<String, String>> _getHeaders() async {
     final prefs = await SharedPreferences.getInstance();
     String licenseKey = prefs.getString('license_key') ?? "";
@@ -229,6 +274,7 @@ class ApiService {
     String assignedWarehouseId = prefs.get('assigned_warehouse_id')?.toString() ?? "";
     String registerId = prefs.get('assigned_register_id')?.toString() ?? "";
     String mobileUserId = prefs.get('mobile_user_id')?.toString() ?? "";
+    String userHash = prefs.getString('user_hash') ?? ""; // 🟢 Empreinte de sécurité
 
     Map<String, String> headers = {
       "Content-Type": "application/json",
@@ -260,6 +306,7 @@ class ApiService {
     if (!globalReg && registerId.isNotEmpty && registerId != "null") headers["x-register-id"] = registerId;
     
     if (mobileUserId.isNotEmpty && mobileUserId != "null") headers["x-mobile-user-id"] = mobileUserId;
+    if (userHash.isNotEmpty) headers["x-user-hash"] = userHash; // 🟢 Envoi de l'empreinte au Cloud
 
     return headers;
   }
@@ -320,6 +367,9 @@ class ApiService {
         if (signatureBase64 != null && signatureBase64.isNotEmpty) {
            await prefs.setString('company_signature_b64', signatureBase64);
         }
+        
+        // 🟢 FIX FEATURE TOGGLING : Notifier l'application des nouveaux modules
+        FeatureProvider.instance.refreshFeatures();
       }
     } catch (e) {
       debugPrint("Erreur de synchronisation des paramètres: $e");
@@ -360,7 +410,10 @@ class ApiService {
           if (prefs.containsKey('company_info_cache')) {
             cached = json.decode(prefs.getString('company_info_cache')!);
           }
-        } catch (_) {}
+        } catch (e) {
+          debugPrint("Cache corrompu purgé (key: company_info_cache)");
+          await prefs.remove('company_info_cache');
+        }
         cached.addAll(fields);
         await prefs.setString('company_info_cache', json.encode(cached));
         debugPrint('✅ [COMPANY] Infos entreprise mises à jour');
@@ -397,7 +450,10 @@ class ApiService {
             if (prefs.containsKey('company_info_cache')) {
               cached = json.decode(prefs.getString('company_info_cache')!);
             }
-          } catch (_) {}
+          } catch (e) {
+            debugPrint("Cache corrompu purgé (key: company_info_cache)");
+            await prefs.remove('company_info_cache');
+          }
           cached['logo_url'] = logoUrl;
           await prefs.setString('company_info_cache', json.encode(cached));
         }
@@ -425,7 +481,10 @@ class ApiService {
       if (prefs.containsKey('thermal_config_cache')) {
         return json.decode(prefs.getString('thermal_config_cache')!);
       }
-    } catch (_) {}
+    } catch (e) {
+      debugPrint("Cache corrompu purgé (key: thermal_config_cache)");
+      await prefs.remove('thermal_config_cache');
+    }
     // Config par défaut
     return {
       'show_logo': true,
@@ -489,7 +548,16 @@ class ApiService {
 
     Future<Map<String, dynamic>?> readCache() async {
       final res = await db.query('cache', where: 'key = ?', whereArgs: [_cacheKeyCatalog]);
-      if (res.isNotEmpty) return json.decode(res.first['data'] as String);
+      if (res.isNotEmpty) {
+        // 🟢 FIX FAIL-SAFE : Auto-purge du catalogue
+        try {
+          return json.decode(res.first['data'] as String);
+        } catch (e) {
+          debugPrint("⚠️ Cache Catalogue corrompu détecté. Purge automatique.");
+          await db.delete('cache', where: 'key = ?', whereArgs: [_cacheKeyCatalog]);
+          return null;
+        }
+      }
       return null;
     }
 
@@ -860,13 +928,14 @@ for (var task in snapshot) {
     }
   }
 
-  // 🚀 MISE A JOUR INSTANTANÉE SQLite
+// 🚀 MISE A JOUR INSTANTANÉE SQLite
   Future<void> _updateLocalCacheOptimistically({
     Map<String, dynamic>? updatedProduct, 
     bool isSale = false, 
     List<dynamic>? saleItems,
     bool isPurchase = false,        
-    List<dynamic>? purchaseItems    
+    List<dynamic>? purchaseItems,
+    bool isReturn = false // 🟢 FIX : Ajout du paramètre isReturn
   }) async {
     try {
       await _loadDeltas();
@@ -885,7 +954,15 @@ for (var task in snapshot) {
           if (idx >= 0) {
             double currentStock = double.tryParse(products[idx]['stock'].toString()) ?? 0.0;
             double qty = double.tryParse((item['quantity'] ?? item['qty'] ?? 1).toString()) ?? 0.0;
-            double delta = isSale ? -qty : qty; 
+            
+            // 🟢 FIX : Direction du stock gérée intelligemment selon la vente ou l'achat
+            double delta = 0.0;
+            if (isSale) {
+              delta = isReturn ? qty : -qty; // Retour Vente = On remet en stock
+            } else if (isPurchase) {
+              delta = isReturn ? -qty : qty; // Retour Achat = On enlève du stock
+            }
+            
             if (!_pendingDeltas.containsKey(targetId)) {
                 _pendingDeltas[targetId] = {
                     'expected_cloud_stock': currentStock, 
@@ -915,7 +992,7 @@ for (var task in snapshot) {
   }
 
 
-  Future<void> saveProduct({
+ Future<void> saveProduct({
     String? id, required String name, required double price, required double cost,
     double stock = 0, String? barcode, String? reference, String category = "Divers",
     String subCategory = "", double minStock = 5, double packing = 1,
@@ -924,11 +1001,17 @@ for (var task in snapshot) {
   }) async {
     String finalId = id ?? "TEMP-${DateTime.now().millisecondsSinceEpoch}";
       
+      // 🟢 CORRECTION : Le mobile demande la saisie en HT, le serveur PC stocke en TTC !
+      // On convertit les prix HT en TTC avant l'envoi.
+      double priceTtc = vatPercent > 0 ? price * (1 + (vatPercent / 100)) : price;
+      double priceSemiTtc = vatPercent > 0 ? priceSemi * (1 + (vatPercent / 100)) : priceSemi;
+      double priceWholTtc = vatPercent > 0 ? priceWhol * (1 + (vatPercent / 100)) : priceWhol;
+
       final payload = {
           "id": finalId, 
           "name": name, 
-          "price": price, 
-          "base_price_retail_ttc": price, 
+          "price": priceTtc, // ⬅️ Envoi en TTC
+          "base_price_retail_ttc": priceTtc, 
           "cost": cost, 
           "base_purchase_price": cost,    
           "stock": stock, 
@@ -944,10 +1027,10 @@ for (var task in snapshot) {
           "min_stock_alert": minStock, 
           "packing": packing, 
           "unit_per_package": packing,    
-          "price_semi": priceSemi, 
-          "price_semi_wholesale_ttc": priceSemi,
-          "price_whol": priceWhol, 
-          "price_wholesale_ttc": priceWhol,
+          "price_semi": priceSemiTtc, 
+          "price_semi_wholesale_ttc": priceSemiTtc,
+          "price_whol": priceWholTtc, 
+          "price_wholesale_ttc": priceWholTtc,
           "unit": unit, 
           "stock_unit": unit,
           "vat_percent": vatPercent, 
@@ -1003,7 +1086,8 @@ for (var task in snapshot) {
       };
     }).toList();
 
-   final payload = {
+  final payload = {
+      "invoice_number": "MOB-${DateTime.now().millisecondsSinceEpoch}-${Random().nextInt(9999)}", // 🟢 FIX DOUBLE VENTE
       "total_amount": total,
       "total_ttc": total, 
       "amount_paid": amountPaid,
@@ -1030,12 +1114,13 @@ for (var task in snapshot) {
       "user_id": posUserId,
       "mobile_user_id": mobileUserId,
 
-      // 🚛 FIX CHANTIER 1 : Van tour ID pour déduction stock fourgon côté backend
+     // 🚛 FIX CHANTIER 1 : Van tour ID pour déduction stock fourgon côté backend
       "van_tour_id": vanTourId,
 
       if (saleId != null) "sale_id": saleId, // ✏️ ÉDITION : UPDATE au lieu d'INSERT
     };
-    await _updateLocalCacheOptimistically(isSale: true, saleItems: items);
+    // 🟢 FIX : Passer isReturn au cache !
+    await _updateLocalCacheOptimistically(isSale: true, saleItems: items, isReturn: isReturn);
 
     // 🛠️ FIX CRITIQUE STOCK CHAUFFEUR : Décrémenter aussi le stock du fourgon dans active_tour
     if (userRole == 'chauffeur') {
@@ -1068,7 +1153,8 @@ for (var task in snapshot) {
       };
     }).toList();
 
-   final payload = {
+  final payload = {
+      "number": "PO-MOB-${DateTime.now().millisecondsSinceEpoch}-${Random().nextInt(9999)}", // 🟢 FIX DOUBLE ACHAT
       "total_amount": total,
       "items": cleanItems,
       "supplier_id": supplierId,
@@ -1081,17 +1167,18 @@ for (var task in snapshot) {
       "timbre": timbre,
       "total_ht": ht,
       "vat_enabled": enableTva ? 1 : 0,
-      "discount": discount,
+     "discount": discount,
       "is_return": isReturn ? 1 : 0,
 
       if (poId != null) "po_id": poId,   // ✏️ ÉDITION : UPDATE au lieu d'INSERT
     };
-    await _updateLocalCacheOptimistically(isPurchase: true, purchaseItems: items);
+    // 🟢 FIX : Passer isReturn au cache !
+    await _updateLocalCacheOptimistically(isPurchase: true, purchaseItems: items, isReturn: isReturn);
     _lastCommandTime = DateTime.now(); 
     _addToQueue(poId != null ? 'UPDATE_PURCHASE' : 'CREATE_PURCHASE', payload);
   }
 
-  Future<void> createTier(String type, Map<String, dynamic> data) async {
+ Future<void> createTier(String type, Map<String, dynamic> data) async {
     final action = (type.contains('client')) ? 'ADD_CLIENT' : 'ADD_SUPPLIER';
     final newTier = {
       'id': 'TEMP', 
@@ -1099,10 +1186,16 @@ for (var task in snapshot) {
       'phone': data['phone'] ?? '', 
       'balance': 0,
       'price_tier': 'retail',
-      'credit_limit': 0.0
+      'credit_limit': 0.0,
+      'type': type, // 🟢 Identifiant de liste
+      'added_at': DateTime.now() // 🟢 Horodatage pour la durée de vie
     };
+    
+    _recentAddedTiers.add(newTier); // 🟢 On sauvegarde en mémoire fraîche
+    
     if (type.contains('client')) _cachedClients.insert(0, newTier);
     else _cachedSuppliers.insert(0, newTier);
+    
     _lastCommandTime = DateTime.now(); 
     _addToQueue(action, {
       ...data, 
@@ -1150,20 +1243,49 @@ for (var task in snapshot) {
   }
 
   Future<Map<String, dynamic>> fetchDashboardData({bool forceRefresh = false}) async {
+     final db = await database;
+     Future<Map<String, dynamic>?> readCache() async {
+       final res = await db.query('cache', where: 'key = ?', whereArgs: ['dashboard_cache']);
+       if (res.isNotEmpty) {
+         // 🟢 FIX FAIL-SAFE : Try-catch sur la lecture SQLite
+         try {
+           return json.decode(res.first['data'] as String);
+         } catch (e) {
+           debugPrint("⚠️ Cache Dashboard corrompu détecté. Purge automatique.");
+           await db.delete('cache', where: 'key = ?', whereArgs: ['dashboard_cache']);
+           return null; // Force l'application à re-télécharger
+         }
+       }
+       return null;
+     }
+
+     if (!forceRefresh) {
+       final cached = await readCache();
+       if (cached != null && DateTime.now().difference(_lastCommandTime).inSeconds < 2) return cached;
+     }
+
      try {
        final headers = await _getHeaders();
        final resp = await http.get(Uri.parse('$_baseUrl/dashboard'), headers: headers).timeout(const Duration(seconds: 15));
+       
+       _checkUnauthorized(resp); // 🟢 VÉRIFICATION EXPULSION
+       
        if (resp.statusCode == 200) {
          _lastError = null; // 🟢 Connexion OK = on efface l'erreur
-         return json.decode(resp.body);
+         final data = json.decode(resp.body);
+         await db.insert('cache', {'key': 'dashboard_cache', 'data': resp.body}, conflictAlgorithm: ConflictAlgorithm.replace);
+         return data;
        }
        debugPrint("⚠️ [API] /dashboard HTTP ${resp.statusCode}");
        _lastError = _humanizeError(resp.statusCode);
-     } catch(e){
-       debugPrint("❌ [API] /dashboard EXCEPTION: $e");
-       _lastError = _humanizeError(e);
-     }
-     return {};
+      } catch(e){
+        // 🟢 SÉCURITÉ : Ne pas passer en hors-ligne si c'est une expulsion !
+        if (e.toString().contains('AUTH_INVALID')) throw e;
+        debugPrint("❌ [API] /dashboard EXCEPTION: $e");
+        _lastError = _humanizeError(e);
+      }
+     final cached = await readCache();
+     return cached ?? {};
   }
   
   Future<List<dynamic>> getSalesList({int limit = 50}) async => _fetchList('/sales');
@@ -1173,7 +1295,19 @@ for (var task in snapshot) {
  // --- MULTI-CAISSE (CASH MANAGER) ---
   Future<List<dynamic>> getRegisters() async => _fetchList('/registers');
   Future<List<dynamic>> getCashSessions() async => _fetchList('/cash_sessions');
-  Future<List<dynamic>> getRegisterOperations() async => _fetchList('/register_operations');
+  Future<List<dynamic>> getRegisterOperations() async {
+    final prefs = await SharedPreferences.getInstance();
+    final role = prefs.getString('user_role') ?? '';
+    final bool isAdmin = role == 'admin' || role == 'proprietaire' || role == 'manager';
+    final int? regId = prefs.getInt('assigned_register_id');
+    
+    // 🛡️ SÉCURITÉ : Si ce n'est pas un admin, on force l'API à ne renvoyer que SON historique
+    if (!isAdmin && regId != null) {
+        return _fetchList('/registers/$regId/history');
+    }
+    // Sinon, on charge l'historique global
+    return _fetchList('/register_operations');
+  }
   Future<List<dynamic>> getRegisterFullHistory(int regId) async => _fetchList('/registers/$regId/history'); // 🟢 NOUVELLE ROUTE !
 
   Future<void> openCashSessionOptimistic(int registerId, double initialFloat, String note) async {
@@ -1255,16 +1389,34 @@ for (var task in snapshot) {
     }
     try {
       final resp = await http.get(Uri.parse('$_baseUrl$endpoint'), headers: await _getHeaders()).timeout(const Duration(seconds: 15)); 
-      if (resp.statusCode == 200) {
+      _checkUnauthorized(resp); // 🟢 VÉRIFICATION EXPULSION
+ if (resp.statusCode == 200) {
         final decodedData = json.decode(resp.body);
         if (decodedData is List) {
           final list = List<dynamic>.from(decodedData);
+          
+          // 🟢 FIX BUG DISPARITION : Réinjecter les éléments récemment ajoutés 
+          // (le temps que le serveur PC traite sa file d'attente)
+          _recentAddedTiers.removeWhere((t) => DateTime.now().difference(t['added_at'] as DateTime).inSeconds > 15);
+          
           // 🚀 CACHE RAM + SQLite (Offline-First)
           if (endpoint.contains('/clients')) {
+            var recents = _recentAddedTiers.where((t) => t['type'].toString().contains('client'));
+            for (var r in recents) {
+                if (!list.any((c) => c['name'].toString().toLowerCase() == r['name'].toString().toLowerCase())) {
+                    list.insert(0, r);
+                }
+            }
             _cachedClients = List.from(list);
             _saveTiersCache('clients', list);
           }
           if (endpoint.contains('/suppliers')) {
+            var recents = _recentAddedTiers.where((t) => !t['type'].toString().contains('client'));
+            for (var r in recents) {
+                if (!list.any((s) => s['name'].toString().toLowerCase() == r['name'].toString().toLowerCase())) {
+                    list.insert(0, r);
+                }
+            }
             _cachedSuppliers = List.from(list);
             _saveTiersCache('suppliers', list);
           }
@@ -1275,11 +1427,14 @@ for (var task in snapshot) {
           debugPrint("✅ [API] $endpoint → ${list.length} éléments");
           return list;
         }
-      } else {
+      }
+      else {
         debugPrint("⚠️ [API] $endpoint HTTP ${resp.statusCode}: ${resp.body.substring(0, (resp.body.length).clamp(0, 200))}");
         _lastError = _humanizeError(resp.statusCode);
       }
     } catch(e) {
+      // 🟢 SÉCURITÉ : Ne pas passer en hors-ligne si c'est une expulsion !
+      if (e.toString().contains('AUTH_INVALID')) throw e;
       debugPrint("❌ [API] $endpoint EXCEPTION: $e");
       _lastError = _humanizeError(e);
     }
@@ -1365,15 +1520,32 @@ for (var task in snapshot) {
   
   Future<Map<String, dynamic>> verifyCredentials(String licenseKey, String username, String pass) async {
     try {
+       // 🔒 GÉNÉRATION DE L'EMPREINTE UNIQUE DU TÉLÉPHONE
+       final prefsDevice = await SharedPreferences.getInstance();
+       String? deviceId = prefsDevice.getString('infinity_device_id');
+       if (deviceId == null) {
+         deviceId = 'DEV_${DateTime.now().millisecondsSinceEpoch}_${Random().nextInt(9999)}';
+         await prefsDevice.setString('infinity_device_id', deviceId);
+       }
+
        final resp = await http.post(
          Uri.parse('$_baseUrl/mobile/login'), 
-         headers: { "Content-Type": "application/json", "x-license-key": licenseKey }, // The interceptor expects x-license-key for tenant resolution
-         body: json.encode({ "username": username, "password": pass })
+         headers: { "Content-Type": "application/json", "x-license-key": licenseKey }, 
+         body: json.encode({ "username": username, "password": pass, "device_id": deviceId }) // 🟢 ENVOI DE L'EMPREINTE
        ).timeout(const Duration(seconds: 25));
        
        if(resp.statusCode == 200) {
           final data = json.decode(resp.body);
           if (data['success'] == true) {
+            // 🟢 NOUVEAU : Purge totale du cache précédent pour éviter les fuites de données 
+            // entre utilisateurs ou après un Factory Reset.
+            await clearCache();
+            try {
+              final prefs = await SharedPreferences.getInstance();
+              await prefs.remove('active_van_tour_id');
+              await prefs.remove('active_van_id');
+            } catch (_) {}
+            
             final prefs = await SharedPreferences.getInstance();
             await prefs.setString('license_key', licenseKey); // For API backwards compatibility
             await prefs.setString('api_user', username);
@@ -1398,6 +1570,11 @@ for (var task in snapshot) {
             if (mUid != null) await prefs.setInt('mobile_user_id', mUid);
             else await prefs.remove('mobile_user_id');
 
+            // 🟢 SAUVEGARDE EMPREINTE DE SÉCURITÉ
+            if (data['user_hash'] != null) {
+              await prefs.setString('user_hash', data['user_hash']);
+            }
+
             final eId = _parseIntSecure(data['employee_id']);
             if (eId != null) await prefs.setInt('employee_id', eId);
             else await prefs.remove('employee_id');
@@ -1420,6 +1597,13 @@ for (var task in snapshot) {
             
             if (data['has_global_register_access'] == true || data['has_global_register_access'] == '1') await prefs.setBool('global_register', true);
             else await prefs.remove('global_register');
+            
+            // 📦 STOCK NÉGATIF : Sauvegarder le paramètre par utilisateur
+            if (data['allow_negative_stock'] == true || data['allow_negative_stock'] == 1) {
+              await prefs.setBool('allow_negative_stock', true);
+            } else {
+              await prefs.setBool('allow_negative_stock', false);
+            }
             
             return {'success': true, 'message': 'Connexion réussie'};
           }
@@ -1695,7 +1879,7 @@ Future<void> sendAddProduct(String n, double p, double c, double s, String b, St
       for (int i = 0; i < 7; i++) {
         await Future.delayed(const Duration(seconds: 2));
         
-        final pdfUrl = 'https://infi-nasro2.online/api/uploads/$taskId.pdf';
+        final pdfUrl = 'https://infi-algdzyounesnasro.it.com/api/uploads/$taskId.pdf';
         final checkResponse = await http.get(Uri.parse('$pdfUrl?t=${DateTime.now().millisecondsSinceEpoch}')); 
         
         if (checkResponse.statusCode == 200 && checkResponse.bodyBytes.length > 1000) {
@@ -1781,6 +1965,13 @@ Future<void> sendAddProduct(String n, double p, double c, double s, String b, St
     }
     try {
       final headers = await _getHeaders();
+      
+      // 🟢 CORRECTIF CRITIQUE : Bloquer si l'ID mobile est manquant
+      if (headers["x-mobile-user-id"] == null || headers["x-mobile-user-id"]!.isEmpty) {
+        debugPrint("GPS_DIRECT: Utilisateur non-mobile, GPS ignoré par le serveur.");
+        return false;
+      }
+
       final res = await http.post(
         Uri.parse('$_baseUrl/mobile/gps/update'),
         headers: {...headers, 'Content-Type': 'application/json'},
@@ -1817,7 +2008,6 @@ Future<void> sendAddProduct(String n, double p, double c, double s, String b, St
         final data = jsonDecode(res.body);
         if (data['success'] == true && data['tour'] != null) {
           final tour = data['tour'];
-          // 🚛 FIX CHANTIER 1 : Sauvegarder le van_tour_id et van_id pour createSale()
           final prefs = await SharedPreferences.getInstance();
           if (tour['tour_id'] != null) {
             await prefs.setInt('active_van_tour_id', tour['tour_id'] is int ? tour['tour_id'] : int.tryParse(tour['tour_id'].toString()) ?? 0);
@@ -1825,7 +2015,7 @@ Future<void> sendAddProduct(String n, double p, double c, double s, String b, St
           if (tour['van_id'] != null) {
             await prefs.setInt('active_van_id', tour['van_id'] is int ? tour['van_id'] : int.tryParse(tour['van_id'].toString()) ?? 0);
           }
-          // 🚀 V3 : Cache offline de la tournée
+          
           try {
             final db = await database;
             await db.insert('active_tour', {
@@ -1836,9 +2026,21 @@ Future<void> sendAddProduct(String n, double p, double c, double s, String b, St
             }, conflictAlgorithm: ConflictAlgorithm.replace);
           } catch (_) {}
           return tour;
+        } else {
+          // 🟢 CORRECTION CRITIQUE (FACTORY RESET) : Si le serveur confirme qu'il n'y a PAS de tournée, 
+          // on PURGE obligatoirement le cache local pour éviter l'affichage de données fantômes !
+          try {
+            final db = await database;
+            await db.delete('active_tour');
+            final prefs = await SharedPreferences.getInstance();
+            await prefs.remove('active_van_tour_id');
+            await prefs.remove('active_van_id');
+          } catch (_) {}
+          return {};
         }
       }
-      // Fallback offline : lire depuis SQLite
+      
+      // Fallback offline UNIQUEMENT en cas de perte de réseau (Pas en cas de réponse 200)
       try {
         final db = await database;
         final rows = await db.query('active_tour', limit: 1);
@@ -1848,8 +2050,12 @@ Future<void> sendAddProduct(String n, double p, double c, double s, String b, St
       } catch (_) {}
       return {};
     } catch (e) {
+      // 🟢 SÉCURITÉ : Ne pas passer en hors-ligne si c'est une expulsion !
+      if (e.toString().contains('AUTH_INVALID')) throw e;
+
       _lastError = "Erreur tournée: $e";
       debugPrint("LOGISTIQUE: Erreur getActiveTour - $e");
+      
       // Fallback offline
       try {
         final db = await database;
@@ -2026,7 +2232,7 @@ Future<void> sendAddProduct(String n, double p, double c, double s, String b, St
     return {'success': true, 'message': 'Tournée clôturée (hors ligne)'};
   }
 
-  Future<Map<String, dynamic>> createTransfer(int toWh, List<Map<String, dynamic>> items) async {
+  Future<Map<String, dynamic>> createTransfer(int toWh, List<Map<String, dynamic>> items, {int? vanId}) async {
     final List<Map<String, dynamic>> cleanItems = [];
     for (final i in items) {
       cleanItems.add({
@@ -2036,7 +2242,8 @@ Future<void> sendAddProduct(String n, double p, double c, double s, String b, St
       });
     }
     _lastCommandTime = DateTime.now();
-    _addToQueue('CREATE_TRANSFER', {'to_wh': toWh, 'items': cleanItems});
+    // 🟢 FIX : Ajout du van_id dans le payload
+    _addToQueue('CREATE_TRANSFER', {'to_wh': toWh, 'van_id': vanId, 'items': cleanItems});
     return {'success': true, 'message': 'Transfert créé (hors ligne)'};
   }
 
