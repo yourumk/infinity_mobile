@@ -1,5 +1,5 @@
 {
-  "version": "2.0.11",
-  "url": "https://github.com/yourumk/infinity_mobile/releases/download/v2.0.11/app-release.apk",
-  "changelog": "Stabilité globale et optimisations de performance\nMise à jour interne"
+  "version": "2.0.12",
+  "url": "https://github.com/yourumk/infinity_mobile/releases/download/v2.0.12/app-release.apk",
+  "changelog": "Optimisation des permissions Android\nNouveau système d'audit système backend (historique sécurisé)"
 }

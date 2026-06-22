@@ -109,31 +109,15 @@ class UpdateService {
     return false;
   }
 
-  // ═══════════════════════════════════════════════════════════════
-  // 🔐 PERMISSIONS ANDROID (Adaptatif selon version)
+ // ═══════════════════════════════════════════════════════════════
+  // 🔐 PERMISSIONS ANDROID (Correction Android 13+)
   // ═══════════════════════════════════════════════════════════════
   Future<bool> _requestPermissions(BuildContext context) async {
     if (Platform.isAndroid) {
-      // Android 13+ : storage retourne permanentlyDenied (permission supprimée)
-      final storageStatus = await Permission.storage.status;
-      if (storageStatus.isPermanentlyDenied || storageStatus.isRestricted) {
-        debugPrint("📱 Android 13+ : permission storage ignorée (non requise)");
-      } else if (!storageStatus.isGranted) {
-        final result = await Permission.storage.request();
-        if (!result.isGranted && !result.isPermanentlyDenied) {
-          if (context.mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-              content: const Text("Autorisation de stockage nécessaire"),
-              backgroundColor: Colors.orange.shade700,
-              behavior: SnackBarBehavior.floating,
-              action: SnackBarAction(label: "Ouvrir", textColor: Colors.white, onPressed: () => openAppSettings()),
-            ));
-          }
-          return false;
-        }
-      }
+      // 🚀 La permission de stockage a été retirée car elle fait planter Android 13+.
+      // Elle n'est pas requise pour écrire dans getTemporaryDirectory().
 
-      // Permission d'installation d'APK
+      // Permission d'installation d'APK (La seule vraiment nécessaire)
       final installStatus = await Permission.requestInstallPackages.status;
       if (!installStatus.isGranted) {
         final result = await Permission.requestInstallPackages.request();
@@ -152,7 +136,6 @@ class UpdateService {
     }
     return true;
   }
-
   // ═══════════════════════════════════════════════════════════════
   // 🎨 DIALOGUE PREMIUM "NOUVELLE VERSION DISPONIBLE"
   // ═══════════════════════════════════════════════════════════════
