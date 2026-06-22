@@ -32,7 +32,15 @@ class ApiService {
   String? _lastError;
   String? get lastError => _lastError;
   set lastError(String? value) => _lastError = value;
-  void clearError() => _lastError = null; 
+  void clearError() => _lastError = null;
+  String _generateUUID() {
+    final random = Random.secure();
+    final bytes = List<int>.generate(16, (i) => random.nextInt(256));
+    bytes[6] = (bytes[6] & 0x0f) | 0x40; // Version 4
+    bytes[8] = (bytes[8] & 0x3f) | 0x80; // Variant 1
+    final chars = bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+    return '${chars.substring(0, 8)}-${chars.substring(8, 12)}-${chars.substring(12, 16)}-${chars.substring(16, 20)}-${chars.substring(20)}';
+  } 
 
   String _humanizeError(dynamic error) {
     if (error is int) {
@@ -199,6 +207,29 @@ class ApiService {
     String fileName = path.replaceAll('\\', '/').split('/').last;
     return 'https://infi-algdzyounesnasro.it.com/api/mobile_images/$fileName';
   }
+  // =====================================================================
+  // 🧭 AIGUILLEUR UNIVERSEL MULTI-DÉPÔTS (NOUVELLE MÉTHODE INFAILLIBLE)
+  // =====================================================================
+  Future<int?> getEffectiveWarehouseId() async {
+    final prefs = await SharedPreferences.getInstance();
+    
+    final userRole = prefs.getString('user_role') ?? '';
+    final assignedWhId = prefs.getInt('assigned_warehouse_id');
+    final selectedWhId = prefs.getInt('selected_warehouse_id');
+    final globalWh = prefs.getBool('global_warehouse') ?? false;
+    final vanId = prefs.getInt('active_van_id');
+
+    // 1. Priorité absolue : Si c'est un chauffeur en tournée, tout part dans le fourgon
+    if (userRole == 'chauffeur' && vanId != null) {
+      return vanId;
+    }
+    // 2. Si c'est un Admin/Manager qui a sélectionné un dépôt (Vue Globale)
+    if (globalWh && selectedWhId != null) {
+      return selectedWhId;
+    }
+    // 3. Sinon, c'est le dépôt fixe du Vendeur/Caissier
+    return assignedWhId;
+  }
 
  List<Map<String, dynamic>> _commandQueue = [];
   final List<Map<String, dynamic>> _recentAddedTiers = []; // 🟢 Cache temporaire pour éviter les disparitions
@@ -311,6 +342,16 @@ class ApiService {
     return headers;
   }
 
+  // 🟢 NOUVEAU : Purge uniquement le catalogue (Utilisé lors du changement de dépôt) sans toucher aux ventes en attente !
+  Future<void> clearCatalogCache() async {
+    final db = await database;
+    await db.delete('cache');
+    await db.delete('tiers_cache');
+    await db.delete('deltas');
+    _pendingDeltas.clear();
+    // ⚠️ NE SURTOUT PAS EFFACER 'queue' ICI !
+  }
+
   // 🛠️ FIX MULTI-DEPOT MOBILE : Méthode unifiée pour changer de dépôt
   /// [warehouseId] = null pour revenir à la vue globale (tous les dépôts)
   Future<void> switchWarehouse(int? warehouseId) async {
@@ -320,8 +361,9 @@ class ApiService {
     } else {
       await prefs.remove('selected_warehouse_id');
     }
-    // Purge le cache pour forcer le rechargement des données du nouveau dépôt
-    await clearCache();
+    // 🟢 FIX CRITIQUE : Utiliser clearCatalogCache pour ne pas effacer les ventes en attente !
+    await clearCatalogCache();
+    
     // Notification aux listeners (pages actives)
     _dataUpdateController.add(null);
     // 🛠️ FIX SELECTOR & STATE : Diffuser l'événement de changement
@@ -695,11 +737,13 @@ class ApiService {
             _currentBackoff = min(_currentBackoff * 2, _maxBackoff);
             debugPrint("⚠️ Backoff Réseau : Prochain essai dans $_currentBackoff s.");
           }
-        } else {
+       } else {
           _currentBackoff = 3; 
           if (_syncCounter % 3 == 0) {
             await getMobileProductCatalog();
-            _dataUpdateController.add(null); 
+            await getTiersList('clients', '');     // 🟢 On rafraîchit les dettes Clients
+            await getTiersList('suppliers', '');   // 🟢 On rafraîchit les dettes Fournisseurs
+            _dataUpdateController.add(null); // Actualise le Dashboard et les listes
           }
         }
       } else {
@@ -796,12 +840,12 @@ class ApiService {
     }
   }
 
-  void _addToQueue(String action, Map<String, dynamic> payload) {
+ void _addToQueue(String action, Map<String, dynamic> payload) {
     if (!payload.containsKey('id') && !payload.containsKey('temp_id')) {
-       payload['temp_id'] = "CMD-${DateTime.now().millisecondsSinceEpoch}";
+       payload['temp_id'] = "CMD-${_generateUUID()}";
     }
     final task = {
-      'id': "TASK-${DateTime.now().millisecondsSinceEpoch}-${Random().nextInt(999)}",
+      'id': "TASK-${_generateUUID()}", // 🛡️ IDEMPOTENCE GARANTIE
       'action': action,
       'payload': payload,
       'timestamp': DateTime.now().toIso8601String()
@@ -928,14 +972,18 @@ for (var task in snapshot) {
     }
   }
 
-// 🚀 MISE A JOUR INSTANTANÉE SQLite
-  Future<void> _updateLocalCacheOptimistically({
+Future<void> _updateLocalCacheOptimistically({
     Map<String, dynamic>? updatedProduct, 
     bool isSale = false, 
     List<dynamic>? saleItems,
     bool isPurchase = false,        
     List<dynamic>? purchaseItems,
-    bool isReturn = false // 🟢 FIX : Ajout du paramètre isReturn
+    bool isReturn = false,
+    
+    // 🟢 NOUVEAU : On capte les infos financières
+    int? partnerId,
+    double? totalAmount,
+    double? amountPaid
   }) async {
     try {
       await _loadDeltas();
@@ -955,12 +1003,11 @@ for (var task in snapshot) {
             double currentStock = double.tryParse(products[idx]['stock'].toString()) ?? 0.0;
             double qty = double.tryParse((item['quantity'] ?? item['qty'] ?? 1).toString()) ?? 0.0;
             
-            // 🟢 FIX : Direction du stock gérée intelligemment selon la vente ou l'achat
             double delta = 0.0;
             if (isSale) {
-              delta = isReturn ? qty : -qty; // Retour Vente = On remet en stock
+              delta = isReturn ? qty : -qty; 
             } else if (isPurchase) {
-              delta = isReturn ? -qty : qty; // Retour Achat = On enlève du stock
+              delta = isReturn ? -qty : qty; 
             }
             
             if (!_pendingDeltas.containsKey(targetId)) {
@@ -971,6 +1018,15 @@ for (var task in snapshot) {
             }
             _pendingDeltas[targetId]!['delta'] = (_pendingDeltas[targetId]!['delta'] as double) + delta;
             products[idx]['stock'] = currentStock + delta; 
+            
+            if (item['variant_id'] != null) {
+              List<dynamic> variants = products[idx]['variants'] ?? [];
+              int vIdx = variants.indexWhere((v) => v['id'].toString() == item['variant_id'].toString());
+              if (vIdx >= 0) {
+                double currentVStock = double.tryParse(variants[vIdx]['stock'].toString()) ?? 0.0;
+                variants[vIdx]['stock'] = currentVStock + delta;
+              }
+            }
           }
         }
         await _saveDeltas();
@@ -985,6 +1041,29 @@ for (var task in snapshot) {
 
       cache['products'] = products;
       await db.insert('cache', {'key': _cacheKeyCatalog, 'data': json.encode(cache)}, conflictAlgorithm: ConflictAlgorithm.replace);
+      
+      // 🟢 NOUVEAU : MISE À JOUR INSTANTANÉE DES DETTES CLIENTS/FOURNISSEURS EN CACHE
+      if (partnerId != null && totalAmount != null && amountPaid != null) {
+         double debtDelta = totalAmount - amountPaid;
+         if (isReturn) debtDelta = -debtDelta; // Un retour diminue la dette
+         
+         if (isSale) {
+            int cIdx = _cachedClients.indexWhere((c) => c['id'].toString() == partnerId.toString());
+            if (cIdx >= 0) {
+               double currentDebt = double.tryParse(_cachedClients[cIdx]['balance']?.toString() ?? '0') ?? 0.0;
+               _cachedClients[cIdx]['balance'] = currentDebt + debtDelta;
+               await _saveTiersCache('clients', _cachedClients);
+            }
+         } else if (isPurchase) {
+            int sIdx = _cachedSuppliers.indexWhere((s) => s['id'].toString() == partnerId.toString());
+            if (sIdx >= 0) {
+               double currentDebt = double.tryParse(_cachedSuppliers[sIdx]['balance']?.toString() ?? '0') ?? 0.0;
+               _cachedSuppliers[sIdx]['balance'] = currentDebt + debtDelta;
+               await _saveTiersCache('suppliers', _cachedSuppliers);
+            }
+         }
+      }
+
       _dataUpdateController.add(null); 
     } catch (e) {
       debugPrint("Erreur Cache Instantané SQLite: $e");
@@ -1047,20 +1126,16 @@ for (var task in snapshot) {
     final prefs = await SharedPreferences.getInstance();
     bool enableTva = prefs.getBool('enable_tva') ?? false;
     
-    // Récupération des IDs logistiques du mobile
+   // Récupération des IDs logistiques du mobile
     int? assignedRegId = prefs.getInt('assigned_register_id');
-    int? assignedWhId = prefs.getInt('assigned_warehouse_id');
     int? empId = prefs.getInt('employee_id');
     int? posUserId = prefs.getInt('pos_user_id');
     int? mobileUserId = int.tryParse(prefs.get('mobile_user_id')?.toString() ?? '');
+    int? vanTourId = prefs.getInt('active_van_tour_id');
     String userRole = prefs.getString('user_role') ?? '';
 
-    // 🚛 FIX CHANTIER 1 : Récupérer le van_tour_id actif pour les chauffeurs
-    int? vanTourId = prefs.getInt('active_van_tour_id');
-    int? vanId = prefs.getInt('active_van_id');
-
-    // 🚛 FIX CHANTIER 1 : Si chauffeur, le warehouse_id de la vente = le van_id du fourgon
-    int? effectiveWhId = (userRole == 'chauffeur' && vanId != null) ? vanId : assignedWhId;
+    // 🟢 UTILISATION DE L'AIGUILLEUR INFAILLIBLE
+    int? effectiveWhId = await getEffectiveWarehouseId();
 
     final cleanItems = items.map((e) {
       double vRate = enableTva ? (double.tryParse(e['vat_percent'].toString()) ?? 0.0) : 0.0;
@@ -1086,8 +1161,9 @@ for (var task in snapshot) {
       };
     }).toList();
 
-  final payload = {
-      "invoice_number": "MOB-${DateTime.now().millisecondsSinceEpoch}-${Random().nextInt(9999)}", // 🟢 FIX DOUBLE VENTE
+ final payload = {
+      // 🚀 INVOICE NUMBER INFAILLIBLE : Timestamp (pour le tri) + UUID tronqué (pour l'unicité)
+      "invoice_number": "MOB-${DateTime.now().millisecondsSinceEpoch.toString().substring(6)}-${_generateUUID().substring(0, 6).toUpperCase()}",
       "total_amount": total,
       "total_ttc": total, 
       "amount_paid": amountPaid,
@@ -1119,8 +1195,15 @@ for (var task in snapshot) {
 
       if (saleId != null) "sale_id": saleId, // ✏️ ÉDITION : UPDATE au lieu d'INSERT
     };
-    // 🟢 FIX : Passer isReturn au cache !
-    await _updateLocalCacheOptimistically(isSale: true, saleItems: items, isReturn: isReturn);
+    // 🟢 FIX : Passer isReturn et Infos Financières au cache !
+    await _updateLocalCacheOptimistically(
+       isSale: true, 
+       saleItems: items, 
+       isReturn: isReturn,
+       partnerId: clientId,
+       totalAmount: total,
+       amountPaid: amountPaid
+    );
 
     // 🛠️ FIX CRITIQUE STOCK CHAUFFEUR : Décrémenter aussi le stock du fourgon dans active_tour
     if (userRole == 'chauffeur') {
@@ -1131,8 +1214,28 @@ for (var task in snapshot) {
     _addToQueue(saleId != null ? "UPDATE_SALE" : "CREATE_SALE", payload);
   }
 
-  Future<void> sendComplexSaleOptimistic(double t, List i, {String? note, int? clientId, String? clientName, double? amountPaid, String? paymentType, double? discount, double tva = 0, double timbre = 0, double ht = 0, bool isReturn = false, int? saleId}) async {
+ Future<void> sendComplexSaleOptimistic(double t, List i, {String? note, int? clientId, String? clientName, double? amountPaid, String? paymentType, double? discount, double tva = 0, double timbre = 0, double ht = 0, bool isReturn = false, int? saleId}) async {
       List<Map<String, dynamic>> cleanItems = i.map((e) => Map<String, dynamic>.from(e)).toList();
+      
+      // 🟢 INJECTION DASHBOARD : Augmente instantanément le CA du jour !
+      try {
+         final db = await database;
+         final res = await db.query('cache', where: 'key = ?', whereArgs: ['dashboard_cache']);
+         if (res.isNotEmpty) {
+            Map<String, dynamic> dashCache = json.decode(res.first['data'] as String);
+            
+            // Calcul du CA
+            double currentCA = double.tryParse(dashCache['sales_today']?.toString() ?? '0') ?? 0.0;
+            dashCache['sales_today'] = isReturn ? currentCA - t : currentCA + t;
+            
+            // Calcul du nombre de ventes
+            int currentCount = int.tryParse(dashCache['sales_count']?.toString() ?? '0') ?? 0;
+            if (!isReturn && saleId == null) dashCache['sales_count'] = currentCount + 1;
+            
+            await db.insert('cache', {'key': 'dashboard_cache', 'data': json.encode(dashCache)}, conflictAlgorithm: ConflictAlgorithm.replace);
+         }
+      } catch(e) {}
+      
       await createSale(total: t, items: cleanItems, clientId: clientId, clientName: clientName, amountPaid: amountPaid??0, paymentType: paymentType??'cash', note: note??'', tva: tva, timbre: timbre, discount: discount??0, ht: ht, isReturn: isReturn, saleId: saleId);
   }
 
@@ -1153,8 +1256,11 @@ for (var task in snapshot) {
       };
     }).toList();
 
-  final payload = {
-      "number": "PO-MOB-${DateTime.now().millisecondsSinceEpoch}-${Random().nextInt(9999)}", // 🟢 FIX DOUBLE ACHAT
+   // 🟢 UTILISATION DE L'AIGUILLEUR INFAILLIBLE (ACHATS)
+    int? effectiveWhId = await getEffectiveWarehouseId();
+
+ final payload = {
+      "number": "PO-MOB-${DateTime.now().millisecondsSinceEpoch.toString().substring(6)}-${_generateUUID().substring(0, 6).toUpperCase()}",
       "total_amount": total,
       "items": cleanItems,
       "supplier_id": supplierId,
@@ -1167,22 +1273,34 @@ for (var task in snapshot) {
       "timbre": timbre,
       "total_ht": ht,
       "vat_enabled": enableTva ? 1 : 0,
-     "discount": discount,
+      "discount": discount,
       "is_return": isReturn ? 1 : 0,
+      "warehouse_id": effectiveWhId, // 🟢 AJOUT CRITIQUE ICI !
 
       if (poId != null) "po_id": poId,   // ✏️ ÉDITION : UPDATE au lieu d'INSERT
     };
-    // 🟢 FIX : Passer isReturn au cache !
-    await _updateLocalCacheOptimistically(isPurchase: true, purchaseItems: items, isReturn: isReturn);
+   // 🟢 FIX : Passer isReturn et Infos Financières au cache !
+    await _updateLocalCacheOptimistically(
+       isPurchase: true, 
+       purchaseItems: items, 
+       isReturn: isReturn,
+       partnerId: supplierId,
+       totalAmount: total,
+       amountPaid: amountPaid
+    );
     _lastCommandTime = DateTime.now(); 
     _addToQueue(poId != null ? 'UPDATE_PURCHASE' : 'CREATE_PURCHASE', payload);
   }
 
- Future<void> createTier(String type, Map<String, dynamic> data) async {
+Future<void> createTier(String type, Map<String, dynamic> data) async {
     final action = (type.contains('client')) ? 'ADD_CLIENT' : 'ADD_SUPPLIER';
+    
+    // 🛡️ GÉNÉRATION INFAILLIBLE : Un nombre négatif unique basé sur le temps (Max 32-bit pour Postgres)
+    final tempId = -(DateTime.now().millisecondsSinceEpoch % 1000000000); 
+
     final newTier = {
-      'id': 'TEMP', 
-      'name': data['name'], 
+      'id': tempId, 
+      'name': data['name'],
       'phone': data['phone'] ?? '', 
       'balance': 0,
       'price_tier': 'retail',
@@ -1379,10 +1497,16 @@ for (var task in snapshot) {
     return {}; 
   }
 
- Future<List<dynamic>> _fetchList(String endpoint) async {
+Future<List<dynamic>> _fetchList(String endpoint) async {
+    // 🛡️ BOUCLIER ANTI-ÉCRASEMENT : Si la file d'attente n'est pas vide, le serveur est en retard.
+    // On conserve la mémoire locale (qui contient les dettes calculées instantanément).
+    if (_commandQueue.isNotEmpty && !endpoint.contains('/sales') && !endpoint.contains('/purchases')) {
+      if (endpoint.contains('/clients') && _cachedClients.isNotEmpty) return _cachedClients;
+      if (endpoint.contains('/suppliers') && _cachedSuppliers.isNotEmpty) return _cachedSuppliers;
+    }
+
     // 🚀 FIX SYNC MOBILE : On retourne le cache SEULEMENT si aucune action n'a eu lieu depuis 2 secondes
-    // Et on force la requête réseau si on demande les Ventes (pour avoir les dernières)
-    if (DateTime.now().difference(_lastCommandTime).inSeconds < 2 && !endpoint.contains('/sales')) {
+    if (DateTime.now().difference(_lastCommandTime).inSeconds < 2 && !endpoint.contains('/sales') && !endpoint.contains('/purchases')) {
       if (endpoint.contains('/clients') && _cachedClients.isNotEmpty) return _cachedClients;
       if (endpoint.contains('/suppliers') && _cachedSuppliers.isNotEmpty) return _cachedSuppliers;
       if (endpoint.contains('/charges') && _cachedCharges.isNotEmpty) return _cachedCharges;
@@ -1623,7 +1747,7 @@ for (var task in snapshot) {
     }
   }
 
-  // 🛠️ FIX MULTI-DEPOT MOBILE : Purge enrichie (tiers_cache ajouté pour le switch dépôt)
+  // 🛠️ FIX MULTI-DEPOT MOBILE : Purge complète (Utilisée pour la déconnexion ou expulsion)
   Future<void> clearCache() async {
     final db = await database;
     await db.delete('queue');

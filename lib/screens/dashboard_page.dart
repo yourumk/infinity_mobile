@@ -165,15 +165,14 @@ class _DashboardPageState extends State<DashboardPage> {
             setState(() {
               _rawKpi = data;
               final tables = data['tables'];
-              
-              if (tables != null && tables is Map) {
+            if (tables != null && tables is Map) {
                 _financeData = _safeList(tables['finance']);
                 _topProducts = _safeList(tables['top_products']);
                 _recentPurchases = _safeList(tables['purchases']);
                 if (tables['sleeping_stock'] != null) {
                      _sleepingStock = _safeList(tables['sleeping_stock']);
-                } else if (tables['charges'] != null && (tables['charges'] as List).isNotEmpty) {
-                     _sleepingStock = _safeList(tables['charges']); 
+                } else {
+                     _sleepingStock = []; // 🟢 FIX : On ne mélange JAMAIS le stock avec les charges financières !
                 }
               }
             });

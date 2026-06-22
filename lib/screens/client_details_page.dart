@@ -24,15 +24,45 @@ class _ClientDetailsPageState extends State<ClientDetailsPage> with SingleTicker
   bool _isLoading = true;
   double _currentBalance = 0;
   
-  // 🟢 FIX : Le versement est désormais accessible à tous les rôles par défaut.
   bool _canAddPayment = true; 
+
+  // 🛡️ RECALCUL LOCAL DU SOLDE (Zéro attente)
+  double _calculateLocalBalance(Map<String, dynamic> data) {
+    double totalVentes = 0;
+    double totalPaiements = 0;
+
+    List sales = data['last_sales'] ?? data['history_sales'] ?? data['sales'] ?? [];
+    List payments = data['last_payments'] ?? data['history_payments'] ?? data['payments'] ?? [];
+
+    for (var s in sales) {
+      if (s != null && s is Map) {
+        totalVentes += double.tryParse(s['total_amount']?.toString() ?? '0') ?? 0;
+        // On déduit l'acompte déjà payé sur le ticket lui-même
+        totalPaiements += double.tryParse(s['amount_paid']?.toString() ?? '0') ?? 0;
+      }
+    }
+    for (var p in payments) {
+      if (p != null && p is Map) {
+        // Ignorer les paiements locaux temporaires car ils sont déjà déduits du solde visuel
+        if (p['is_local'] != true) {
+            totalPaiements += double.tryParse(p['amount']?.toString() ?? '0') ?? 0;
+        }
+      }
+    }
+    return totalVentes - totalPaiements;
+  }
 
   @override
   void initState() {
     super.initState();
     _tabController = TabController(length: 2, vsync: this);
     _fullData = widget.summary;
-    _currentBalance = double.tryParse(widget.summary['balance']?.toString() ?? '0') ?? 0;
+    
+    // On privilégie le recalcul local s'il y a des données, sinon le solde fourni par le parent
+    double rawBalance = double.tryParse(widget.summary['balance']?.toString() ?? '0') ?? 0;
+    double calculatedBalance = _calculateLocalBalance(widget.summary);
+    _currentBalance = calculatedBalance > 0.01 ? calculatedBalance : rawBalance;
+    
     _loadDetails();
   }
 
@@ -45,15 +75,19 @@ class _ClientDetailsPageState extends State<ClientDetailsPage> with SingleTicker
     super.dispose();
   }
 
-  Future<void> _loadDetails() async {
+ Future<void> _loadDetails() async {
     setState(() => _isLoading = true);
     try {
       final freshData = await _api.getTierDetails('client', widget.summary['id']);
       if (mounted) {
         setState(() {
-          if (freshData != null && freshData is Map) {
+          if (freshData != null && freshData.isNotEmpty) {
             _fullData = { ...widget.summary, ...freshData };
-            _currentBalance = double.tryParse(_fullData['balance']?.toString() ?? '0') ?? _currentBalance;
+            // On privilégie la balance calculée par le serveur PC s'il répond bien
+            double serverBalance = double.tryParse(_fullData['balance']?.toString() ?? '0') ?? 0;
+            // Si le serveur renvoie 0 (parce qu'il n'a pas encore reçu la vente offline), on garde le local !
+            if (serverBalance == 0) serverBalance = _calculateLocalBalance(_fullData);
+            _currentBalance = serverBalance;
           }
           _isLoading = false;
         });

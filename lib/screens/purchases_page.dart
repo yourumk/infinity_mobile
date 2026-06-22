@@ -267,32 +267,54 @@ _currentSubCategories = ['Tout', ...filteredSubSet];
     return double.tryParse(p['stock']?.toString() ?? '0') ?? 0;
   }
 
+  // 🧠 OUTIL IA : Supprime les accents pour une recherche infaillible
+  String _removeDiacritics(String str) {
+    var withDia = 'ÀÁÂÃÄÅàáâãäåÒÓÔÕÕÖØòóôõöøÈÉÊËèéêëðÇçÐÌÍÎÏìíîïÙÚÛÜùúûüÑñŠšŸÿýŽž';
+    var withoutDia = 'AAAAAAaaaaaaOOOOOOOooooooEEEEeeeeeCcDIIIIiiiiUUUUuuuuNnSsYyyZz';
+    for (int i = 0; i < withDia.length; i++) {
+      str = str.replaceAll(withDia[i], withoutDia[i]);
+    }
+    return str;
+  }
+
   void _applyFilters() {
-    final query = _searchController.text.toLowerCase().trim();
-
     if (_debounce?.isActive ?? false) _debounce!.cancel();
+    
     _debounce = Timer(const Duration(milliseconds: 100), () {
-     List<dynamic> temp = _allProducts.where((p) {
-       final name = (p['name'] ?? '').toString().toLowerCase();
-      final ref = (p['ref'] ?? '').toString().toLowerCase();
-      final barcode = (p['barcode'] ?? '').toString().toLowerCase();
+      final rawQuery = _searchController.text.trim();
       
-      // 🟢 RECHERCHE MULTI-CODES ET VARIANTES
-      List<dynamic> barcodesList = p['barcodes'] ?? [];
-      bool matchesBarcode = barcode.contains(query) || 
-                            barcodesList.any((b) => b.toString().toLowerCase().contains(query));
+      // 🧠 DÉCOUPAGE INTELLIGENT
+      final tokens = _removeDiacritics(rawQuery.toLowerCase())
+          .split(RegExp(r'\s+'))
+          .where((t) => t.isNotEmpty)
+          .toList();
 
-      if (!matchesBarcode && p['variants'] != null) {
-          for (var v in p['variants']) {
-              if ((v['barcode'] ?? '').toString().toLowerCase().contains(query) || 
-                  (v['sku'] ?? '').toString().toLowerCase().contains(query)) {
-                  matchesBarcode = true;
-                  break;
-              }
-          }
-      }
-        final matchesText = query.isEmpty || name.contains(query) || ref.contains(query) || matchesBarcode;
-        // 🟢 FIN DE LA CORRECTION
+      List<dynamic> temp = _allProducts.where((p) {
+        
+        // 1. RECHERCHE MULTI-MOTS GLOBALE
+        bool matchesText = true;
+        if (tokens.isNotEmpty) {
+           List<String> searchableParts = [
+             (p['name'] ?? '').toString(),
+             (p['ref'] ?? '').toString(),
+             (p['barcode'] ?? '').toString(),
+           ];
+           
+           if (p['barcodes'] != null && p['barcodes'] is List) {
+             searchableParts.addAll((p['barcodes'] as List).map((e) => e.toString()));
+           }
+           
+           if (p['variants'] != null && p['variants'] is List) {
+             for (var v in (p['variants'] as List)) {
+               searchableParts.add((v['barcode'] ?? '').toString());
+               searchableParts.add((v['sku'] ?? '').toString());
+             }
+           }
+           
+           String productSearchStr = _removeDiacritics(searchableParts.join(' ').toLowerCase());
+           
+           matchesText = tokens.every((token) => productSearchStr.contains(token));
+        }
 
         bool matchesCategory = true;
         if (_selectedCategory != 'Tout') {
@@ -1595,7 +1617,11 @@ void _updateTotalAndField() {
     );
   }
 
+ bool _isProcessingValidation = false; // 🟢 Anti double-clic sur VALIDER
+
   void _validate() {
+    if (_isProcessingValidation) return; // 🟢 FIX : Bloque le double clic !
+
     final textAmount = _paidController.text.replaceAll(',', '.').trim();
     final paidAmount = double.tryParse(textAmount) ?? 0;
     final remaining = _total - paidAmount;
@@ -1620,7 +1646,15 @@ void _updateTotalAndField() {
     }
 
     double finalDiscount = double.tryParse(_discountController.text) ?? 0.0;
-    widget.onConfirm(null, _selId, _selName, paidAmount, type, finalDiscount, _isReturn); // Note supprimée
+
+    setState(() => _isProcessingValidation = true); // 🟢 On verrouille l'interface
+
+    widget.onConfirm(null, _selId, _selName, paidAmount, type, finalDiscount, _isReturn); 
+    
+    // 🟢 Relâche le verrou après 2s en cas de problème de fermeture de modale
+    Future.delayed(const Duration(seconds: 2), () {
+      if (mounted) setState(() => _isProcessingValidation = false);
+    });
   }
 
   void _showClearCartDialog() {

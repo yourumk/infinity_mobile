@@ -23,12 +23,40 @@ class _SupplierDetailsPageState extends State<SupplierDetailsPage> with SingleTi
   bool _isLoading = true;
   double _currentBalance = 0;
 
+  // 🛡️ RECALCUL LOCAL DU SOLDE (Zéro attente)
+  double _calculateLocalBalance(Map<String, dynamic> data) {
+    double totalAchats = 0;
+    double totalPaiements = 0;
+
+    List purchases = data['last_purchases'] ?? data['history_purchases'] ?? data['purchases'] ?? data['last_sales'] ?? [];
+    List payments = data['last_payments'] ?? data['history_payments'] ?? data['payments'] ?? [];
+
+    for (var po in purchases) {
+      if (po != null && po is Map && (po['status'] == 'confirmed' || po['status'] == 'received')) {
+        totalAchats += double.tryParse(po['total_amount']?.toString() ?? '0') ?? 0;
+        totalPaiements += double.tryParse(po['amount_paid']?.toString() ?? '0') ?? 0;
+      }
+    }
+    for (var p in payments) {
+      if (p != null && p is Map) {
+        if (p['is_local'] != true) {
+            totalPaiements += double.tryParse(p['amount']?.toString() ?? '0') ?? 0;
+        }
+      }
+    }
+    return totalAchats - totalPaiements;
+  }
+
   @override
   void initState() {
     super.initState();
     _tabController = TabController(length: 2, vsync: this);
     _fullData = widget.summary;
-    _currentBalance = double.tryParse(widget.summary['balance'].toString()) ?? 0;
+    
+    double rawBalance = double.tryParse(widget.summary['balance']?.toString() ?? '0') ?? 0;
+    double calculatedBalance = _calculateLocalBalance(widget.summary);
+    _currentBalance = calculatedBalance > 0.01 ? calculatedBalance : rawBalance;
+    
     _loadDetails();
   }
 
@@ -38,7 +66,7 @@ class _SupplierDetailsPageState extends State<SupplierDetailsPage> with SingleTi
     super.dispose();
   }
 
-  Future<void> _loadDetails() async {
+ Future<void> _loadDetails() async {
     if (!mounted) return;
     setState(() => _isLoading = true);
     
@@ -46,8 +74,12 @@ class _SupplierDetailsPageState extends State<SupplierDetailsPage> with SingleTi
       final freshData = await _api.getTierDetails('supplier', widget.summary['id']);
       if (mounted) {
         setState(() {
-          _fullData = { ...widget.summary, ...freshData };
-          _currentBalance = double.tryParse(_fullData['balance'].toString()) ?? _currentBalance;
+          if (freshData != null && freshData.isNotEmpty) {
+             _fullData = { ...widget.summary, ...freshData };
+             double serverBalance = double.tryParse(_fullData['balance']?.toString() ?? '0') ?? 0;
+             if (serverBalance == 0) serverBalance = _calculateLocalBalance(_fullData);
+             _currentBalance = serverBalance;
+          }
           _isLoading = false;
         });
       }

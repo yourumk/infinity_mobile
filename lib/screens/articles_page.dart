@@ -171,39 +171,66 @@ _currentSubCategories = ['Tout', ...filteredSubSet];
     return double.tryParse(p['stock']?.toString() ?? '0') ?? 0;
   }
 
- void _applyFilters() {
-    final query = _searchController.text.toLowerCase().trim();
-    List<dynamic> temp = _allProducts.where((p) {
-    final name = (p['name'] ?? '').toString().toLowerCase();
-      final ref = (p['ref'] ?? '').toString().toLowerCase();
-      final barcode = (p['barcode'] ?? '').toString().toLowerCase();
-      
-      // 🟢 RECHERCHE MULTI-CODES ET VARIANTES
-      List<dynamic> barcodesList = p['barcodes'] ?? [];
-      bool matchesBarcode = barcode.contains(query) || 
-                            barcodesList.any((b) => b.toString().toLowerCase().contains(query));
+ // 🧠 OUTIL IA : Supprime les accents pour une recherche infaillible
+  String _removeDiacritics(String str) {
+    var withDia = 'ÀÁÂÃÄÅàáâãäåÒÓÔÕÕÖØòóôõöøÈÉÊËèéêëðÇçÐÌÍÎÏìíîïÙÚÛÜùúûüÑñŠšŸÿýŽž';
+    var withoutDia = 'AAAAAAaaaaaaOOOOOOOooooooEEEEeeeeeCcDIIIIiiiiUUUUuuuuNnSsYyyZz';
+    for (int i = 0; i < withDia.length; i++) {
+      str = str.replaceAll(withDia[i], withoutDia[i]);
+    }
+    return str;
+  }
 
-      if (!matchesBarcode && p['variants'] != null) {
-          for (var v in p['variants']) {
-              if ((v['barcode'] ?? '').toString().toLowerCase().contains(query) || 
-                  (v['sku'] ?? '').toString().toLowerCase().contains(query)) {
-                  matchesBarcode = true;
-                  break;
-              }
-          }
+  void _applyFilters() {
+    final rawQuery = _searchController.text.trim();
+    
+    // 🧠 DÉCOUPAGE INTELLIGENT : "Cahier A4" devient ["cahier", "a4"]
+    final tokens = _removeDiacritics(rawQuery.toLowerCase())
+        .split(RegExp(r'\s+'))
+        .where((t) => t.isNotEmpty)
+        .toList();
+
+    List<dynamic> temp = _allProducts.where((p) {
+      
+      // 1. RECHERCHE MULTI-MOTS GLOBALE
+      bool matchesText = true;
+      if (tokens.isNotEmpty) {
+         // On compile toutes les infos du produit dans un seul "cerveau" texte
+         List<String> searchableParts = [
+           (p['name'] ?? '').toString(),
+           (p['ref'] ?? '').toString(),
+           (p['barcode'] ?? '').toString(),
+         ];
+         
+         if (p['barcodes'] != null && p['barcodes'] is List) {
+           searchableParts.addAll((p['barcodes'] as List).map((e) => e.toString()));
+         }
+         
+         if (p['variants'] != null && p['variants'] is List) {
+           for (var v in (p['variants'] as List)) {
+             searchableParts.add((v['barcode'] ?? '').toString());
+             searchableParts.add((v['sku'] ?? '').toString());
+           }
+         }
+         
+         String productSearchStr = _removeDiacritics(searchableParts.join(' ').toLowerCase());
+         
+         // 🧠 MOTEUR : TOUS les mots tapés doivent exister dans le produit, peu importe l'ordre !
+         matchesText = tokens.every((token) => productSearchStr.contains(token));
       }
 
-      final matchesText = query.isEmpty || name.contains(query) || ref.contains(query) || matchesBarcode;
       bool matchesCategory = true;
       if (_selectedCategory != 'Tout') {
         final pCat = (p['category'] ?? '').toString();
         matchesCategory = pCat == _selectedCategory;
       }
+      
       bool matchesSubCategory = true;
       if (_selectedSubCategory != 'Tout' && _currentSubCategories.isNotEmpty) {
          final pSub = (p['sub_category'] ?? '').toString();
          matchesSubCategory = pSub == _selectedSubCategory;
       }
+      
       return matchesText && matchesCategory && matchesSubCategory;
     }).toList();
 
@@ -217,7 +244,6 @@ _currentSubCategories = ['Tout', ...filteredSubSet];
       }).toList();
     }
 
-    // 🟢 INCLUSION DES FILTRES DE REPTURE / STOCK BAS
     if (_stockFilter != 'Tout') {
       temp = temp.where((p) {
         final stock = _getEffectiveStock(p);
@@ -230,10 +256,8 @@ _currentSubCategories = ['Tout', ...filteredSubSet];
     }
 
     if (_activeSmartFilter == 'top') {
-      // Simulé pour l'instant
        temp.sort((a, b) => (a['name'] ?? '').toString().compareTo(b['name'] ?? ''));
     } else if (_activeSmartFilter == 'new') {
-       // On inverse la liste pour avoir les derniers ajoutés (si l'API renvoie dans l'ordre)
        temp = temp.reversed.toList();
     } else {
       temp.sort((a, b) => (a['name'] ?? '').toString().compareTo(b['name'] ?? ''));
