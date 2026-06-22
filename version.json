@@ -1,5 +1,5 @@
 {
-  "version": "2.0.10",
-  "url": "https://github.com/yourumk/infinity_mobile/releases/download/v2.0.10/app-release.apk",
-  "changelog": "Correction CRITIQUE de la mise à jour OTA sur Android 13+ (Bypass de la permission de stockage)\nRecherche intelligente sans accents\nRefactorisation et stabilisation du backend"
+  "version": "2.0.11",
+  "url": "https://github.com/yourumk/infinity_mobile/releases/download/v2.0.11/app-release.apk",
+  "changelog": "Stabilité globale et optimisations de performance\nMise à jour interne"
 }
