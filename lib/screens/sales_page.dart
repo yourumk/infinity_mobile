@@ -139,14 +139,20 @@ var uniqueCats = cats.map((e) => e.toString())
     .toList();
 _categories = ['Tout', ...uniqueCats];
 
-          Set<String> subCatsSet = {};
+         Set<String> subCatsSet = {};
           for(var p in _allProducts) {
              if(p['sub_category'] != null && p['sub_category'].toString().isNotEmpty) {
                subCatsSet.add(p['sub_category'].toString());
              }
           }
           _subCategories = subCatsSet.toList();
-          _clients = clientsData;
+          
+          // 🛡️ BOUCLIER VISUEL : On ne remplace la liste que si on a bien reçu des données,
+          // OU si notre liste actuelle est vraiment vide au démarrage.
+          if (clientsData.isNotEmpty || _clients.isEmpty) {
+            _clients = clientsData;
+          }
+          
           _isLoading = false;
           _updateSubCategoryList();
           _applyFilters();

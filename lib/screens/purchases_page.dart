@@ -143,14 +143,19 @@ var uniqueCats = cats.map((e) => e.toString())
     .toList();
 _categories = ['Tout', ...uniqueCats];
 
-          Set<String> subSet = {};
+        Set<String> subSet = {};
           for(var p in _allProducts) {
              if(p['sub_category'] != null && p['sub_category'].toString().isNotEmpty) {
                subSet.add(p['sub_category'].toString());
              }
           }
           _subCategories = subSet.toList();
-          _suppliers = suppliersData;
+          
+          // 🛡️ BOUCLIER VISUEL FOURNISSEURS
+          if (suppliersData.isNotEmpty || _suppliers.isEmpty) {
+            _suppliers = suppliersData;
+          }
+          
           _isLoading = false;
           _updateSubCategoryList();
           _applyFilters();

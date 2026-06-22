@@ -887,14 +887,19 @@ for (var task in snapshot) {
         }
       }
 
-      if (processedIds.isNotEmpty) {
+   if (processedIds.isNotEmpty) {
         _commandQueue.removeWhere((t) => processedIds.contains(t['id']));
         await _saveQueue();
         
-        _cachedClients.clear();
-        _cachedSuppliers.clear();
+        // 🚫 FIX BUG DISPARITION : On ne vide PLUS la mémoire brutalement !
+        // Le réseau va écraser silencieusement les anciennes données.
         
         await getMobileProductCatalog(); 
+        
+        // 🟢 On lance la mise à jour des clients et fournisseurs en arrière-plan
+        getTiersList('clients', '').then((_) => _dataUpdateController.add(null));
+        getTiersList('suppliers', '');
+
         _dataUpdateController.add(null); 
       }
     } finally {
