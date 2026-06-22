@@ -4,8 +4,9 @@ import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:ota_update/ota_update.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:open_file/open_file.dart';
 import 'package:permission_handler/permission_handler.dart';
-
 class UpdateService {
   // ✅ SINGLETON
   static final UpdateService _instance = UpdateService._internal();
@@ -419,41 +420,52 @@ class UpdateService {
       },
     );
 
-    // Lancer le téléchargement OTA
+    // 🚀 Lancer le téléchargement MANUEL (Bypass permission storage sur Android 13+)
     try {
-      OtaUpdate().execute(url, destinationFilename: 'infinity_update.apk').listen(
-        (OtaEvent event) {
-          switch (event.status) {
-            case OtaStatus.DOWNLOADING:
-              progress.value = double.tryParse(event.value ?? '0') ?? 0;
-              statusText.value = "Téléchargement...";
-              break;
-            case OtaStatus.INSTALLING:
-              statusText.value = "Finalisation...";
-              progress.value = 100;
-              if (context.mounted) Navigator.of(context, rootNavigator: true).pop();
-              break;
-            case OtaStatus.ALREADY_RUNNING_ERROR:
-              statusText.value = "Téléchargement déjà actif";
-              break;
-            default:
-              break;
+      // On utilise le dossier cache pour ne pas avoir besoin de permissions
+      final dir = await getTemporaryDirectory();
+      final savePath = "${dir.path}/infinity_update.apk";
+      final file = File(savePath);
+
+      if (await file.exists()) {
+        await file.delete();
+      }
+
+      final request = await HttpClient().getUrl(Uri.parse(url));
+      final response = await request.close();
+
+      if (response.statusCode == 200) {
+        final totalBytes = response.contentLength;
+        int receivedBytes = 0;
+
+        statusText.value = "Téléchargement...";
+        final sink = file.openWrite();
+
+        await response.forEach((List<int> chunk) {
+          receivedBytes += chunk.length;
+          sink.add(chunk);
+          if (totalBytes > 0) {
+            progress.value = (receivedBytes / totalBytes) * 100;
           }
-        },
-        onError: (error) {
-          debugPrint("❌ OTA Error: $error");
-          if (context.mounted) {
-            Navigator.of(context, rootNavigator: true).pop();
-            ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-              content: Text("Échec du téléchargement : $error"),
-              backgroundColor: const Color(0xFFDC2626),
-              behavior: SnackBarBehavior.floating,
-              margin: const EdgeInsets.all(16),
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-            ));
-          }
-        },
-      );
+        });
+
+        await sink.flush();
+        await sink.close();
+
+        statusText.value = "Finalisation...";
+        progress.value = 100;
+        
+        if (context.mounted) {
+          Navigator.of(context, rootNavigator: true).pop(); // Ferme le modal
+        }
+
+        // 🚀 Lancer l'installation !
+        final result = await OpenFile.open(savePath, type: "application/vnd.android.package-archive");
+        debugPrint("Installation OTA résultat: ${result.message}");
+
+      } else {
+        throw Exception("Serveur injoignable (Code ${response.statusCode})");
+      }
     } catch (e) {
       debugPrint("❌ OTA Launch Error: $e");
       if (context.mounted) {

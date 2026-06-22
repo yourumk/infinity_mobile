@@ -1,5 +1,5 @@
 {
-  "version": "2.0.9",
-  "url": "https://github.com/yourumk/infinity_mobile/releases/download/v2.0.9/app-release.apk",
-  "changelog": "Correction de la recherche intelligente sans accents\nRefactorisation et stabilisation du backend (base de données)\nNettoyage du payload JSON en cas d'erreur de typage au lieu de modifier le schéma"
+  "version": "2.0.10",
+  "url": "https://github.com/yourumk/infinity_mobile/releases/download/v2.0.10/app-release.apk",
+  "changelog": "Correction CRITIQUE de la mise à jour OTA sur Android 13+ (Bypass de la permission de stockage)\nRecherche intelligente sans accents\nRefactorisation et stabilisation du backend"
 }
