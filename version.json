@@ -1,5 +1,5 @@
 {
-  "version": "2.0.7",
-  "url": "https://github.com/yourumk/infinity_mobile/releases/download/v2.0.7/app-release.apk",
-  "changelog": "Stock toujours visible sous chaque produit (police large)\nSélection des variantes : modal corrigé (ne se cache plus)\nFiltres de stock intelligents : détection des variantes incluse\nStabilité : suppression des sauts de page au rafraîchissement\nCorrections de performance et optimisations internes"
+  "version": "2.0.8",
+  "url": "https://github.com/yourumk/infinity_mobile/releases/download/v2.0.8/app-release.apk",
+  "changelog": "Correction de la recherche intelligente sans accents (produits, ventes, achats)\nProtection contre les erreurs de double-clic (facturation)\nRésolution fiable des IDs clients et fournisseurs hors-ligne\nMise à jour instantanée du tableau de bord après une vente"
 }
